@@ -20,7 +20,9 @@ ro/ergs.jsonl
 ergs/
 ro/ergs/
 ro/running/
-erg.lock
+db/cards.db
+db/cards.db-wal
+db/cards.db-shm
 tok-pref.json
 web/limits.json
 work/
