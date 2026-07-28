@@ -1,0 +1,54 @@
+# hearth is the SEED, not a running agent. Everything below is per-agent
+# living state or secrets: it belongs in the agent's working copy, never here.
+
+# --- per-host config (describes your machine; see host.conf.example) ---
+host.conf
+
+# --- secrets (never, ever) ---
+secrets/
+*.env
+.env*
+web/key.txt
+*.pem
+
+# --- living state ---
+erg.log
+ro/ro.log
+web/web.log
+ergs.jsonl
+ro/ergs.jsonl
+ergs/
+ro/ergs/
+ro/running/
+erg.lock
+tok-pref.json
+web/limits.json
+work/
+
+# --- mail in flight (structure is tracked via .gitkeep, contents are not) ---
+input/**
+!input/.gitkeep
+!input/processed/
+!input/processed/.gitkeep
+output/**
+!output/.gitkeep
+!output/processed/
+!output/processed/.gitkeep
+ro/input/**
+!ro/input/.gitkeep
+!ro/input/processed/
+!ro/input/processed/.gitkeep
+ro/output/**
+!ro/output/.gitkeep
+!ro/output/processed/
+!ro/output/processed/.gitkeep
+
+# --- an agent's own memory: seeded once, then hers ---
+short-term/**
+!short-term/.gitkeep
+
+# --- junk ---
+*.bak
+*.bak-*
+node_modules/
+.DS_Store

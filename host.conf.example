@@ -1,0 +1,17 @@
+# host.conf — per-host paths, read at startup by erg.js, ro-erg.js and
+# web/server.js. Copy to host.conf and fill in; host.conf is gitignored
+# (it describes YOUR machine, which is exactly what should never be
+# committed to the shared seed). Every key is optional.
+#
+# Where the `claude` CLI lives. Default: `claude` on PATH.
+#CLAUDE_BIN=/usr/local/bin/claude
+#
+# File holding CLAUDE_CODE_OAUTH_TOKEN= (and optional CLAUDE_CODE_OAUTH_TOKEN_2=
+# fallback). If unset, the tokens are taken from the process environment.
+#OAUTH_ENV_FILE=/path/to/tokens.env
+#
+# TLS cert + key for the watch-page. If either is unset, the server falls
+# back to plain HTTP (fine behind a proxy or on localhost — but note the
+# page key then travels unencrypted).
+#TLS_CERT=/path/to/fullchain.pem
+#TLS_KEY=/path/to/privkey.pem

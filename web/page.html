@@ -1,0 +1,649 @@
+<!doctype html>
+<html><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{AGENT_NAME}}</title>
+<style>
+  :root { color-scheme: dark; }
+  body { background:#0e0f12; color:#e8e6e0; font:15px/1.5 system-ui, sans-serif;
+         max-width: 72em; margin: 0 auto; padding: 1em; }
+  /* single column (the operator 2026-07-26, superseding same-day two-column layout):
+     ro answers sit ABOVE main output cards (newest first), the two logs render
+     side-by-side, one input box carries both buttons (drop in / ⇄ ask), and ro
+     cards join the gold anchor system with a teal accent to tell them apart. */
+  #logs { display:grid; grid-template-columns:1fr 1fr; gap:0 1.2em; align-items:start; }
+  #logs .log { max-height:18em; }
+  @media (max-width:56em) { #logs { grid-template-columns:1fr; } }
+  h2.ro { color:#5da9c9; }
+  #ask { background:#2e5c5c; }
+  h1 { font-size:1.15em; display:flex; align-items:center; gap:.7em; }
+  h1 .sub { font-size:.7em; color:#9a938a; font-weight:normal; }
+  #run { background:#7a5c1e; color:#fff; border:0; border-radius:8px; padding:.35em 1em;
+         font:inherit; cursor:pointer; }
+  #run:disabled { opacity:.5; }
+  #dot { font-size:.8em; }
+  /* v7 (the operator 15:51): erg status + play button live in a FIXED panel pinned to
+     the content's top-right, so they stay in view while scrolling. right: is
+     clamped to the centered 60em column's edge on wide screens. z-index 10 =
+     above cards; ids unchanged so the JS ($('dot')/$('run')) is untouched. */
+  #ergpanel { position:fixed; top:.6em; right:max(.8em, calc(50vw - 36em + .8em));
+              z-index:10; display:flex; align-items:center; gap:.7em;
+              background:rgba(21,22,26,.94); border:1px solid #3a3d45;
+              border-radius:10px; padding:.3em .4em .3em .8em;
+              box-shadow:0 2px 10px rgba(0,0,0,.5); }
+  .running { color:#e8b33f; } .idle { color:#8a857c; }
+  #pv { color:#565962; font-size:.68em; align-self:center; }
+  /* limits strip (ported from ariadne, the operator 2026-07-27 12:52Z): usage dials for
+     both subscription tokens — 5h, 7d, and fable-wk (API bucket `7d_oi`, the
+     fable weekly). NOT polled on a timer: data refreshes when an erg finishes
+     while the page is open (running→idle transition), on load if stale, or ↻. */
+  #limits { display:flex; flex-wrap:wrap; gap:.3em 1.4em; align-items:center;
+            background:#15161a; border:1px solid #2a2c31; border-radius:10px;
+            padding:.4em .8em; margin:.5em 0 .2em; font:12px/1.6 ui-monospace, monospace;
+            color:#9a938a; }
+  #limits .lab { color:#c9b458; letter-spacing:.04em; }
+  #limits .tok { display:flex; gap:.75em; align-items:center; white-space:nowrap; }
+  #limits .tn { color:#e8e6e0; }
+  #limits .dial { display:inline-flex; flex-direction:column; gap:2px; line-height:1.25; }
+  #limits .dial b { font-weight:600; color:#9fbe8f; }
+  #limits .dial.warn b { color:#e8b33f; }
+  #limits .dial.crit b { color:#d9756b; }
+  /* dual bars per dial: top = usage, bottom (blue) = how far through the
+     window we are, from the bucket's reset timestamp. */
+  #limits .bar { width:58px; height:4px; background:#20222c; border-radius:2px; overflow:hidden; }
+  #limits .bar i { display:block; height:100%; background:#9fbe8f; border-radius:2px; }
+  #limits .dial.warn .bar.use i { background:#e8b33f; }
+  #limits .dial.crit .bar.use i { background:#d9756b; }
+  #limits .bar.time { height:3px; }
+  #limits .bar.time i { background:#5d84a9; }
+  #limits .asof { color:#565962; margin-left:auto; display:flex; gap:.6em; align-items:center; }
+  #limits button { background:#2a2d3a; color:#cfcac2; border:0; border-radius:6px;
+                   padding:0 .55em; font:inherit; cursor:pointer; }
+  h2 { font-size:.95em; color:#c9b458; margin:1.2em 0 .4em; }
+  .log { background:#0a0b0d; border:1px solid #2a2c31; border-radius:8px; padding:.7em;
+         font:12px/1.5 ui-monospace, monospace; white-space:pre-wrap; word-break:break-all;
+         max-height:22em; overflow-y:auto; color:#b6b1a8; }
+  .log .plan { color:#e8b33f; font-weight:bold; }
+  .log .cost { color:#e8b33f; font-weight:bold; }
+  .log .dur  { color:#6fb3d2; font-weight:bold; }
+  .log .tok  { color:#a68cc9; }
+  .log .fail { color:#d9756b; font-weight:bold; }
+  .card { background:#15161a; border:1px solid #2a2c31; border-radius:10px;
+          padding:.6em .9em; margin:.6em 0; transition:border-color .25s, box-shadow .25s; }
+  .card.processed { opacity:.45; }
+  /* ro-lane cards (⇄ read-only answers): teal accent distinguishes them from
+     main-lane cards (the operator 2026-07-26 "maybe color"); .card.reading is defined
+     LATER so the gold anchor highlight wins border-color/bg when it lands on
+     one (equal specificity — keep this rule ABOVE .card.reading). */
+  .card.ro { border-color:#2e4a57; border-left:3px solid #5da9c9; background:#12161b; }
+  .rolab { background:#173642; border:1px solid #2e5c6e; border-radius:6px; padding:0 .5em;
+           color:#5da9c9; white-space:nowrap; }
+  /* the reading mark: thin gold line FIXED at the 1/3 reading point (v5 — the operator
+     2026-07-25 15:17: "supposed to stay at 1/3 down the screen"; v4 had moved it
+     beneath the anchor card's bottom edge, which made it track scrolling — a
+     misread of the 15:06 "beneath the card" nice-to-have). Hidden entirely when
+     nothing is anchored. top here MUST match anchorY() in the JS.
+     v6 (the operator 15:25 "gold bar over (not under) the cards"): z-index -1 paints the
+     line BEHIND all opaque content — visible only in the page-background gaps/
+     margins at the 1/3 point; the gold border+glow marks the anchored card.
+     v7 (the operator 15:43 "highlight the border in the same gold as the line"): the old
+     .reading border (1px, .75 alpha) was too subtle to read as a highlight —
+     now a solid #c9b458 border + 1px ring (box-shadow, no layout shift) in
+     EXACTLY the line's gold, so line-behind-card and card-border read as one.
+     v8 (the operator 15:56 "I don't see the gold highlight" — v7 verified live in his
+     tab, defect not reproducible statically): highlight now ALSO uses outline
+     (independent paint channel from border/box-shadow) + a faint warm card
+     tint, so it survives whatever ate v7's border; #pv badge in the erg panel
+     shows the live page version so a stale tab is diagnosable at a glance. */
+  #anchorline { position:fixed; left:0; right:0; top:33.333vh; height:1px; z-index:-1;
+    background:linear-gradient(90deg, transparent, rgba(201,180,88,.55) 15%, rgba(201,180,88,.55) 85%, transparent);
+    pointer-events:none; transition:opacity .3s; }
+  #anchorline.off { opacity:0; }
+  .card.reading { border-color:#c9b458; outline:2px solid #c9b458; outline-offset:1px;
+                  box-shadow:0 0 18px rgba(201,180,88,.6); background:#1a1812; }
+  .card .meta { font-size:.72em; color:#9a938a; display:flex; gap:.8em; align-items:center; }
+  .card .meta button { background:#2d5c2e; color:#fff; border:0; border-radius:6px;
+                       padding:.1em .7em; font-size:1em; cursor:pointer; margin-left:auto; }
+  .card pre { margin:.4em 0 0; white-space:pre-wrap; word-wrap:break-word; font:13px/1.5 ui-monospace, monospace; }
+  form { display:flex; gap:.5em; margin:.5em 0; }
+  .card form { margin:.5em 0 0; }
+  .card form textarea { min-height:2.2em; font-size:.9em; }
+  .card form button { background:#5c3e6e; }
+  textarea { flex:1; background:#1a1c21; color:#e8e6e0; border:1px solid #2a2c31;
+             border-radius:8px; padding:.5em; font:inherit; min-height:3em; resize:vertical; }
+  form button { background:#1f4e79; color:#fff; border:0; border-radius:8px; padding:0 1.2em;
+                font:inherit; cursor:pointer; }
+  #note { color:#9a938a; font-size:.8em; min-height:1.1em; }
+  .card pre a { color:#6fb3d2; text-decoration:underline; word-break:break-all; }
+  h2 label { font-weight:normal; color:#9a938a; font-size:.85em; margin-left:.8em; }
+  h2 input[type=range] { vertical-align:middle; width:9em; accent-color:#c9b458; }
+  .prio { background:#23252b; border:1px solid #3a3d45; border-radius:6px; padding:0 .5em; color:#c9b458; white-space:nowrap; }
+  .prio.hot { background:#5c2e2e; border-color:#8a4444; color:#f0b0a8; }
+  .card pre a:hover { color:#9fd3ec; }
+  details > summary { cursor:pointer; color:#9a938a; font-size:.85em; }
+  .card .meta a.report { background:#1f4e79; color:#fff; border-radius:6px; padding:.1em .7em;
+                         text-decoration:none; white-space:nowrap; }
+  .card .meta a.report:hover { background:#2a679c; }
+  .card .meta button.mdt { background:#3a3d45; color:#cfcac2; margin-left:auto; }
+  .card .meta button.mdt:hover { background:#4a4e57; }
+  .card .md { margin:.4em 0 0; overflow-wrap:break-word; }
+  .card .md h1, .card .md h2, .card .md h3, .card .md h4, .card .md h5, .card .md h6 {
+    margin:.6em 0 .25em; color:#e8e6e0; font-size:1em; }
+  .card .md h1 { font-size:1.15em; color:#c9b458; }
+  .card .md h2 { font-size:1.08em; color:#c9b458; }
+  .card .md h3 { font-size:1.02em; color:#c9b458; }
+  .card .md p { margin:.35em 0; }
+  .card .md ul, .card .md ol { margin:.3em 0 .3em 1.5em; padding:0; }
+  .card .md li { margin:.15em 0; }
+  .card .md code { background:#22242a; border:1px solid #2f3238; border-radius:4px;
+                   padding:0 .3em; font:.92em ui-monospace, monospace; }
+  .card .md pre.code { background:#0a0b0d; border:1px solid #2a2c31; border-radius:8px;
+                       padding:.5em .7em; margin:.4em 0; overflow-x:auto; }
+  .card .md pre.code code { background:none; border:0; padding:0;
+                            font:12px/1.5 ui-monospace, monospace; white-space:pre-wrap; }
+  .card .md blockquote { margin:.4em 0; padding:.1em .8em; border-left:3px solid #3a3d45; color:#b6b1a8; }
+  .card .md table { border-collapse:collapse; margin:.4em 0; font-size:.92em; }
+  .card .md th, .card .md td { border:1px solid #3a3d45; padding:.15em .5em; text-align:left; }
+  .card .md th { background:#1c1e23; color:#c9b458; }
+  .card .md hr { border:0; border-top:1px solid #2a2c31; margin:.6em 0; }
+  .card .md a { color:#6fb3d2; text-decoration:underline; word-break:break-all; }
+  .card .md a:hover { color:#9fd3ec; }
+</style>
+</head><body>
+<div id="anchorline" class="off" title="reading mark — the card above this line stays put when new cards arrive"></div>
+<h1>🏛 {{AGENT_NAME}} <span class="sub">{{PURPOSE}}</span></h1>
+<div id="ergpanel">
+    <span id="dot" class="idle">○ idle</span>
+    <span id="rodot" class="idle" title="parallel read-only ergs in flight (right column)">⇄ 0</span>
+    <button id="run" title="perform one erg (N clicks queue N ergs)">▶ erg</button>
+    <span id="pv" title="page version this tab is running — if it differs from the newest card's claim, the tab is stale; reload"></span></div>
+
+<div id="limits" title="subscription usage — 5h + weekly (all models) + fable weekly (API bucket 7d_oi), per token. Refreshes when an erg finishes while this page is open; no background polling.">loading limits…</div>
+
+<div id="logs">
+  <div><h2>status — erg.log (live)</h2><div id="log" class="log">loading…</div></div>
+  <div><h2 class="ro">⇄ ro/ro.log (live)</h2><div id="rolog" class="log">…</div></div>
+</div>
+
+<h2>give work <span style="font-weight:normal;color:#9a938a">— drop in → input/ (▶ later) · ⇄ ask → fires a read-only erg now</span></h2>
+<form id="f">
+  <textarea id="t" placeholder="describe work or ask… Enter / 'drop in' → input/ (does NOT auto-run — hit ▶ erg); '⇄ ask' (or Ctrl+Enter) → fires one parallel read-only erg immediately; Shift+Enter = newline"></textarea>
+  <button>drop in</button>
+  <button type="button" id="ask" title="fires one parallel read-only erg right away (runs alongside; can't touch mind/memory/input)">⇄ ask</button>
+</form>
+<div id="note"></div>
+<details id="inputs-wrap"><summary>input/ files</summary><div id="inputs"></div></details>
+<details id="roinputs-wrap"><summary>ro/input/ asks</summary><div id="roinputs"></div></details>
+
+<h2 class="ro">⇄ answers — parallel read-only ergs, newest first (archive → ro/output/processed/)</h2>
+<div id="rooutputs">…</div>
+
+<h2>output/ — unread, sorted by priority (archive moves them to output/processed/)
+  <label>importance <input type="range" id="w" min="0" max="100" title="sort weight: left = importance, right = urgency"> urgency</label></h2>
+<div id="outputs">…</div>
+
+<script>
+  history.scrollRestoration = 'manual';  // we restore scroll ourselves after async render
+  if (location.hash.startsWith('#k=')) {
+    localStorage.{{AGENT_NAME}}key = location.hash.slice(3);
+    history.replaceState(null, '', location.pathname);
+  }
+  const K = localStorage.{{AGENT_NAME}}key || '';
+  const $ = (id) => document.getElementById(id);
+  const esc = (s) => s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/"/g,'&quot;');
+  // (on already-escaped text) turn markdown [text](url) links and bare http(s) URLs
+  // into clickable <a target=_blank>; trailing punctuation stays outside the link
+  const linkRep = (s) => s.replace(
+    /\[([^\]\n]+)\]\((https?:\/\/[^\s()<>]+)\)|(https?:\/\/[^\s<>\])]+)/g,
+    (m, txt, md, bare) => {
+      let url = md || bare, tail = '';
+      if (!md) { const t = url.match(/(?:[.,;:!?'»*]|&quot;|&amp;|&lt;)+$/); if (t) { tail = t[0]; url = url.slice(0, url.length - t[0].length); } }
+      return '<a href="' + url + '" target="_blank" rel="noopener">' + (md ? txt : url) + '</a>' + tail;
+    });
+  const linkify = (s) => linkRep(esc(s));
+  // minimal markdown → html (self-contained, everything escaped first).
+  // inline: code spans (protected), links, **bold**, *em*/_em_, ~~del~~
+  const mdInline = (s) => {
+    const hold = [];  // protected fragments (code spans, rendered links) — formatting regexes must never see inside them
+    const stash = (html) => (hold.push(html), '\x00' + (hold.length - 1) + '\x00');
+    const fmt = (t) => t
+      .replace(/\*\*([^*\n]+)\*\*/g, '<strong>$1</strong>')
+      .replace(/(^|[\s(])\*([^*\n]+)\*(?=[\s).,;:!?]|$)/g, '$1<em>$2</em>')
+      .replace(/(^|[\s(])_([^_\n]+)_(?=[\s).,;:!?]|$)/g, '$1<em>$2</em>')
+      .replace(/~~([^~\n]+)~~/g, '<del>$1</del>');
+    s = esc(s).replace(/`([^`\n]+)`/g, (m, c) => stash('<code>' + c + '</code>'));
+    // stash rendered links (formatting their text only) BEFORE running fmt on the rest —
+    // else **…** can match a ** inside an href and splice </strong> into the tag → unclosed <strong> bleeds into later cards
+    s = fmt(linkRep(s).replace(/(<a [^>]*>)([^<]*)(<\/a>)/g, (m, open, txt, close) => stash(open + fmt(txt) + close)));
+    while (/\x00\d+\x00/.test(s)) s = s.replace(/\x00(\d+)\x00/g, (m, n) => hold[n]);  // loop: stashed anchors may hold nested code-span placeholders
+    return s;
+  };
+  // blocks: fenced code, #headings, hr, > quotes, -/1. lists (flat), |tables|, paragraphs
+  function mdRender(src) {
+    const L = src.split('\n'), out = [];
+    const item = /^\s*[-*+]\s+|^\s*\d+[.)]\s+/;
+    let i = 0;
+    while (i < L.length) {
+      const l = L[i]; let m;
+      if (/^\s*$/.test(l)) { i++; continue; }
+      if (m = l.match(/^(```|~~~)/)) {
+        const buf = []; i++;
+        while (i < L.length && !L[i].startsWith(m[1])) buf.push(L[i++]);
+        i++;
+        out.push('<pre class="code"><code>' + esc(buf.join('\n')) + '</code></pre>'); continue;
+      }
+      if (m = l.match(/^(#{1,6})\s+(.*)/)) {
+        out.push('<h' + m[1].length + '>' + mdInline(m[2]) + '</h' + m[1].length + '>'); i++; continue;
+      }
+      if (/^\s*(?:-{3,}|\*{3,}|_{3,})\s*$/.test(l)) { out.push('<hr>'); i++; continue; }
+      if (/^\s*>/.test(l)) {
+        const buf = [];
+        while (i < L.length && /^\s*>/.test(L[i])) buf.push(L[i++].replace(/^\s*>\s?/, ''));
+        out.push('<blockquote>' + mdRender(buf.join('\n')) + '</blockquote>'); continue;
+      }
+      if (item.test(l)) {
+        const ord = /^\s*\d+[.)]\s+/.test(l), items = [];
+        const re = ord ? /^\s*\d+[.)]\s+/ : /^\s*[-*+]\s+/;
+        while (i < L.length && re.test(L[i])) {
+          let it = L[i++].replace(re, '');
+          while (i < L.length && /^\s+\S/.test(L[i]) && !item.test(L[i])) it += '\n' + L[i++].trim();
+          items.push('<li>' + mdInline(it) + '</li>');
+        }
+        out.push((ord ? '<ol>' : '<ul>') + items.join('') + (ord ? '</ol>' : '</ul>')); continue;
+      }
+      if (l.includes('|') && i + 1 < L.length && /^\s*\|?(\s*:?-{2,}:?\s*\|)+\s*:?-*:?\s*\|?\s*$/.test(L[i + 1])) {
+        const cells = (r) => r.replace(/^\s*\|/, '').replace(/\|\s*$/, '').split('|').map(c => mdInline(c.trim()));
+        const head = cells(l); i += 2;
+        const rows = [];
+        while (i < L.length && L[i].includes('|')) rows.push(cells(L[i++]));
+        out.push('<table><thead><tr><th>' + head.join('</th><th>') + '</th></tr></thead><tbody>' +
+          rows.map(r => '<tr><td>' + r.join('</td><td>') + '</td></tr>').join('') + '</tbody></table>'); continue;
+      }
+      const buf = [l]; i++;
+      while (i < L.length && !/^\s*$/.test(L[i]) &&
+             !/^(#{1,6}\s|```|~~~|\s*>)/.test(L[i]) && !item.test(L[i]) &&
+             !/^\s*(?:-{3,}|\*{3,}|_{3,})\s*$/.test(L[i]))
+        buf.push(L[i++]);
+      out.push('<p>' + buf.map(mdInline).join('<br>') + '</p>');
+    }
+    return out.join('\n');
+  }
+  const MDRAW = new Set();  // lane:name keys the operator toggled to raw view (default = rendered)
+  let lastLog = '', lastRoLog = '', lastIn = '', lastRoIn = '', VER = null, REPORTS = [];
+  // the two card lanes (the operator 2026-07-26, single-column since same-day v2): main
+  // = normal ergs (plain /input drop-ins never auto-run, but a card REPLY via
+  // /input auto-queues an erg server-side — ported from ariadne, the operator
+  // 2026-07-27), ro = parallel read-only ergs (/ro-ask fires one immediately).
+  // ro answer cards render in #rooutputs ABOVE #outputs, newest first,
+  // teal-accented. A reply in EITHER lane auto-archives its card; an ro reply
+  // therefore also fires a fresh parallel erg carrying the quoted context.
+  const LANES = {
+    main: { key:'main', box:'outputs', ask:'/input', archive:'/archive', note:'note',
+            outs:[], last:'', empty:'(nothing unread)', reports:true, prioSort:true,
+            replyPath:'output/', replyMsg:(n)=>'reply in input/ as '+n+' — card archived — erg queued' },
+    ro:   { key:'ro', box:'rooutputs', ask:'/ro-ask', archive:'/ro-archive', note:'note',
+            outs:[], last:'', empty:'(no answers yet)', reports:false, prioSort:false,
+            replyPath:'ro/output/', replyMsg:(n)=>'follow-up '+n+' — parallel erg fired, card archived' }
+  };
+
+  // scroll anchoring v5 (the operator 2026-07-25 15:17: line must STAY at 1/3 — v4's
+  // under-the-card placement tracked scrolling): the anchor is the card at the
+  // 1/3-viewport reading point; it gets a .reading glow, re-renders keep it
+  // visually still, and #anchorline sits fixed at 1/3 (CSS top, no JS override).
+  // v3's `scrollY < 8` early-null disabled anchoring exactly when the operator hadn't
+  // scrolled yet — on a tall viewport cards sit at 1/3-viewport at scrollY=0, so
+  // their card got pushed down by an insert-above and nothing glowed, while the
+  // .12-opacity dimmed line still looked "on". Guard removed: the
+  // mark-in-static-content check below already yields null at the true top.
+  // If the mark sits in static content (header/log/form) with no card spanning
+  // it, nothing the operator reads can move → do NOT adjust, and hide the line entirely.
+  // Capture fallback candidates too, in case the anchor card itself is removed.
+  const anchorY = () => innerHeight / 3;  // the reading point — MUST match #anchorline CSS top:33.333vh
+  function anchorCapture() {
+    // v9 (found via headless-chromium screenshot, 2026-07-26): closed <details>
+    // content gets content-visibility:hidden in Chromium — it still LAYS OUT, so
+    // hidden #inputs cards had r.height>0, came first in document order, and
+    // STOLE the anchor: line on, gold painted on an invisible card, visible
+    // output card bare. This was the whole v7/v8 "I don't see the highlight"
+    // mystery. Filter: checkVisibility() is false under content-visibility:
+    // hidden (Chrome 105+); closed-details check as fallback for older engines.
+    const cards = [];
+    document.querySelectorAll('#inputs .card[data-name], #roinputs .card[data-name], #rooutputs .card[data-name], #outputs .card[data-name]').forEach(el => {
+      const r = el.getBoundingClientRect();
+      const vis = el.checkVisibility ? el.checkVisibility()
+                                     : !el.closest('details:not([open])');
+      if (r.height > 0 && vis) cards.push({ box: el.parentElement.id, name: el.dataset.name, top: r.top, bottom: r.bottom });
+    });
+    const y = anchorY();
+    const i = cards.findIndex(c => c.bottom > y);      // topmost card spanning/below the mark
+    if (i < 0) return null;                            // no cards at/below the mark
+    if (i === 0 && cards[0].top > y) return null;      // mark is in static header/log — don't move
+    return cards.slice(i, i + 3);                      // anchor + fallbacks (anchor may get archived away)
+  }
+  // BOOTED guards first paint (v10 single-column): during the FIRST refresh the
+  // boxes fill one after another (main outputs, then ro cards ABOVE them), so an
+  // anchor captured mid-sequence sees the later insert as "content grew above my
+  // card" and scrollBy-yanks a fresh tab ~the ro-card height down from the top.
+  // Two columns never hit this (ro inserts couldn't move main cards). No restore
+  // until one full render pass is done.
+  let BOOTED = false;
+  function anchorRestore(list) {
+    if (!BOOTED || !list) return;
+    for (const a of list) {
+      const el = document.querySelector('#' + a.box + ' .card[data-name="' + CSS.escape(a.name) + '"]');
+      if (el) { const d = el.getBoundingClientRect().top - a.top; if (d) scrollBy(0, d); return; }
+    }
+  }
+  // highlight the current anchor card; the mark line itself is CSS-fixed at 1/3
+  // (line hidden when no anchor is active)
+  function anchorMark() {
+    const list = anchorCapture();
+    const name = list ? list[0].name : null, boxId = list ? list[0].box : null;
+    document.querySelectorAll('.card.reading').forEach(el => {
+      if (!name || el.dataset.name !== name || el.parentElement.id !== boxId) el.classList.remove('reading');
+    });
+    const line = $('anchorline');
+    const el = name && document.querySelector('#' + boxId + ' .card[data-name="' + CSS.escape(name) + '"]');
+    if (el) el.classList.add('reading');
+    line.classList.toggle('off', !el);
+  }
+  addEventListener('scroll', () => requestAnimationFrame(anchorMark), { passive: true });
+  addEventListener('resize', () => requestAnimationFrame(anchorMark));
+  function renderLog(text) {
+    return esc(text).split('\n').map(l => {
+      if (/\[erg\] (PLAN|DONE):/.test(l)) return '<span class="plan">' + l + '</span>';
+      if (/erg done |ERG FAILED /.test(l)) return l
+        .replace(/ERG FAILED/, '<span class="fail">ERG FAILED</span>')
+        .replace(/took \d+(?:m\d+)?s/, m => '<span class="dur">' + m + '</span>')
+        .replace(/cost \$[\d.?]+/, m => '<span class="cost">' + m + '</span>')
+        .replace(/tok [\d.kM]+ in \([\d.kM]+ cached\) \/ [\d.kM]+ out/, m => '<span class="tok">' + m + '</span>');
+      return l;
+    }).join('\n');
+  }
+  // ---- limits strip (ported from ariadne, the operator 2026-07-27 12:52Z) ----
+  // No timer probes anything. The server caches the last probe in
+  // web/limits.json; we re-probe ONLY on: erg finishing while page is open
+  // (running true→false, i.e. "data from the most recent erg"), page load
+  // with a stale cache (>15 min), or the ↻ button. Server debounces to one
+  // probe per 90s no matter what. fable-wk = API bucket 7d_oi.
+  let limitsAt = 0, prevRunning = null, limitsData = null;
+  const LIMIT_BUCKETS = [['5h', '5h'], ['7d', '7d'], ['7d_oi', 'fable-wk']];
+  const LIMIT_WIN = { '5h': 5 * 3600e3, '7d': 7 * 86400e3, '7d_oi': 7 * 86400e3 }; // window lengths (ms)
+  const fmtReset = (ms) => ms ? new Date(ms).toLocaleString([], { weekday: 'short', hour: '2-digit', minute: '2-digit' }) : '?';
+  function renderLimits(d) {
+    limitsData = d;
+    const rows = (d.slots || []).map(s => {
+      if (s.error) return '<span class="tok"><span class="tn">tok' + s.slot + '</span> <span class="dial crit"><b>probe failed: ' + esc(String(s.error)) + '</b></span></span>';
+      const dials = LIMIT_BUCKETS.map(([k, lab]) => {
+        const b = s.buckets && s.buckets[k];
+        if (!b) return '';
+        const pct = Math.round(b.util * 100);
+        const cls = pct >= 90 ? ' crit' : pct >= 75 ? ' warn' : '';
+        const mark = pct >= 90 ? '‼' : pct >= 75 ? '⚠' : '';
+        // bottom bar: % of the window already elapsed, derived from reset - now
+        const ePct = b.reset ? Math.round(Math.max(0, Math.min(1, 1 - (b.reset - Date.now()) / LIMIT_WIN[k])) * 100) : null;
+        const win = k === '5h' ? '5-hour' : '7-day';
+        return '<span class="dial' + cls + '" title="' + lab + (k === '7d_oi' ? ' (API bucket 7d_oi — fable weekly)' : '') +
+          ' · top bar: ' + pct + '% used · bottom bar: ' + (ePct === null ? '?' : ePct) + '% of the ' + win + ' window elapsed · resets ' + esc(fmtReset(b.reset)) + ' UTC-local">' +
+          '<span>' + lab + ' <b>' + pct + '%' + mark + '</b></span>' +
+          '<span class="bar use"><i style="width:' + pct + '%"></i></span>' +
+          '<span class="bar time"><i style="width:' + (ePct === null ? 0 : ePct) + '%"></i></span></span>';
+      }).join(' ');
+      return '<span class="tok"><span class="tn">tok' + s.slot + '</span> ' + dials + '</span>';
+    }).join('') || '<span class="dial">(no data yet — hit ↻)</span>';
+    $('limits').innerHTML = '<span class="lab" title="subscription rate-limit dials — 5h window · weekly all-models · fable weekly">limits</span>' + rows +
+      '<span class="asof">' + (d.at ? 'as of ' + new Date(d.at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) + (d.why ? ' (' + esc(String(d.why)) + ')' : '') : 'never probed') +
+      ' <button id="limref" title="probe both tokens now (~66 tokens; server allows at most one probe per 90s)">↻</button></span>';
+    $('limref').onclick = () => fetchLimits(true, 'manual');
+  }
+  async function fetchLimits(probe, why) {
+    try {
+      const r = await fetch('/limits?k=' + K + (probe ? '&probe=1&why=' + encodeURIComponent(why || 'page') : ''));
+      const j = await r.json();
+      if (j.ok) { limitsAt = j.at || 0; renderLimits(j); }
+    } catch (_) {}
+  }
+  async function refresh() {
+    try {
+      const r = await fetch('/state?k=' + K);
+      if (r.status === 403) { $('log').textContent = 'locked — open the link with the key'; return; }
+      const j = await r.json();
+      if (VER === null) VER = j.ver;                      // baseline at first contact
+      else if (j.ver !== VER) {                           // server/page updated → reload,
+        sessionStorage.setItem('{{AGENT_NAME}}scroll', scrollY);  // stashing scroll (restored below
+        return location.reload();                         // once content has rendered)
+      }
+      $('dot').textContent = j.running ? '● erg in flight' : '○ idle';
+      $('dot').className = j.running ? 'running' : 'idle';
+      // erg just finished while we watched → capture fresh limit dials
+      // ("data from the most recent erg" — the probe rides the erg's tail)
+      if (prevRunning === true && !j.running) fetchLimits(true, 'erg-end');
+      prevRunning = j.running;
+      const ro = j.ro || { running: 0, log: '', outputs: [], inputs: [] };
+      $('rodot').textContent = '⇄ ' + ro.running;
+      $('rodot').className = ro.running ? 'running' : 'idle';
+      $('pv').textContent = 'pv·' + String(j.ver).slice(-6);  // stale-tab detector (v8)
+      const logBox = (id, text) => {   // sticky-bottom log box (both lanes)
+        const el = $(id);
+        const stick = el.scrollTop + el.clientHeight >= el.scrollHeight - 30;
+        el.innerHTML = renderLog(text);
+        if (stick || !el.dataset.init) { el.scrollTop = el.scrollHeight; el.dataset.init = 1; }
+      };
+      if (j.log !== lastLog) { lastLog = j.log; logBox('log', j.log); }
+      if (ro.log !== lastRoLog) { lastRoLog = ro.log; logBox('rolog', ro.log); }
+      REPORTS = j.reports || [];
+      const outS = JSON.stringify(j.outputs) + JSON.stringify(REPORTS);
+      if (outS !== LANES.main.last) { LANES.main.last = outS; renderOutputs(LANES.main, j.outputs); }
+      const roS = JSON.stringify(ro.outputs);
+      if (roS !== LANES.ro.last) { LANES.ro.last = roS; renderOutputs(LANES.ro, ro.outputs); }
+      const inputsBox = (id, inputs) => {
+        const anc = anchorCapture();
+        $(id).innerHTML = inputs.map(i =>
+          '<div class="card' + (i.processed ? ' processed' : '') + '" data-name="' + esc(i.name) + '"><div class="meta">' +
+          esc(i.name) + ' · ' + new Date(i.t).toLocaleString() + (i.processed ? ' · ✓ processed' : ' · waiting') +
+          '</div><pre>' + linkify(i.text) + '</pre></div>').join('') || '(none)';
+        anchorRestore(anc);
+      };
+      const inS = JSON.stringify(j.inputs);
+      if (inS !== lastIn) { lastIn = inS; inputsBox('inputs', j.inputs); }
+      const roInS = JSON.stringify(ro.inputs);
+      if (roInS !== lastRoIn) { lastRoIn = roInS; inputsBox('roinputs', ro.inputs); }
+      // after a ver-change reload, content is now rendered → put scroll back
+      const sy = sessionStorage.getItem('{{AGENT_NAME}}scroll');
+      if (sy !== null) { sessionStorage.removeItem('{{AGENT_NAME}}scroll'); scrollTo(0, +sy); }
+      BOOTED = true;
+      anchorMark();
+    } catch (e) { $('dot').textContent = '○ unreachable'; $('dot').className = 'idle'; }
+  }
+  // reactive re-render (operator ask 2026-07-25): only cards that CHANGED get rebuilt.
+  // The old code rebuilt #outputs wholesale (innerHTML) and copied reply drafts
+  // back by hand — which destroyed the textarea the operator was typing in (cursor to end,
+  // undo gone, and any race or reload wiped the draft). Now cards are keyed by
+  // data-name: unchanged cards aren't touched at all, changed cards rebuild their
+  // meta+body only while the live <form> DOM node is carried over UNTOUCHED, and
+  // reordering moves nodes with insertBefore (state survives a move; focus is put
+  // back manually since moving a focused element blurs it). Drafts additionally
+  // persist to sessionStorage (keyed by card name) so even a ver-flip reload of
+  // the whole page can't eat them.
+  // priority line (file line 2, written by {{AGENT_NAME}}): "priority: importance=N urgency=N" (1-10).
+  // Slider weight w blends them: score = (1-w)*importance + w*urgency. Unrated files count as 5/5.
+  const prioOf = (o) => {
+    const m = o.text.match(/^priority:\s*importance=(\d+)[,\s]+urgency=(\d+)/m);
+    return { imp: m ? +m[1] : 5, urg: m ? +m[2] : 5 };
+  };
+  // output card X.md with a companion output/reports/X.html gets a report button
+  const reportOf = (name) => {
+    const h = name.replace(/\.[^.]+$/, '') + '.html';
+    return REPORTS.includes(h) ? h : null;
+  };
+  const sigHash = (s) => { let h = 9; for (let i = 0; i < s.length; i++) h = Math.imul(h ^ s.charCodeAt(i), 0x01000193); return (h >>> 0).toString(36); };
+  const draftKey = (name) => '{{AGENT_NAME}}draft:' + name;                       // the two ask boxes ('#main', '#ro')
+  const cardDraftKey = (lane, name) => '{{AGENT_NAME}}draft:' + (lane.key === 'ro' ? 'ro:' : '') + name;
+  const rawKey = (lane, name) => lane.key + ':' + name;
+  function cardContentHTML(lane, o, raw) {
+    const body = o.text.replace(/^priority:\s*importance=\d+[,\s]+urgency=\d+.*\n?/m, '');
+    const rep = lane.reports ? reportOf(o.name) : null;
+    return '<div class="meta">' +
+      (lane.key === 'ro' ? '<span class="rolab" title="answer from a parallel read-only erg">⇄ ro</span>' : '') +
+      '<span class="prio' + (o.score >= 7 ? ' hot' : '') + '" title="importance ' + o.imp + ' · urgency ' + o.urg + '">i' + o.imp + '·u' + o.urg + '</span>' +
+      esc(o.name) + ' · ' + new Date(o.t).toLocaleString() +
+      (rep ? '<a class="report" href="/report?name=' + encodeURIComponent(rep) + '&k=' + encodeURIComponent(K) + '" target="_blank" rel="noopener">🧾 diff report</a>' : '') +
+      '<button type="button" class="mdt" data-name="' + esc(o.name) + '" title="toggle rendered markdown / raw text">' + (raw ? '𝐌 md' : '¶ raw') + '</button>' +
+      '</div>' +
+      (raw ? '<pre>' + linkify(body) + '</pre>' : '<div class="md">' + mdRender(body) + '</div>');
+  }
+  const cardFormHTML = (lane, name) =>
+    '<form class="reply" data-name="' + esc(name) + '">' +
+    '<textarea placeholder="' + (lane.key === 'ro'
+      ? 'follow up… (Enter sends; fires a fresh parallel read-only erg with this answer quoted + archives this card)'
+      : 'reply to this message… (Enter sends; goes to input/ quoted like an email + archives this card)') + '"></textarea>' +
+    '<button>↩ reply</button>' +
+    '<button type="button" class="arch">archive</button>' +
+    '</form>';
+  function renderOutputs(lane, outputs) {
+    lane.outs = outputs;
+    const w = (+localStorage.{{AGENT_NAME}}w || 50) / 100;
+    const list = outputs.map(o => {
+      const { imp, urg } = prioOf(o);
+      return { ...o, imp, urg, score: (1 - w) * imp + w * urg };
+    }).sort((a, b) => lane.prioSort ? (b.score - a.score || b.t - a.t) : (b.t - a.t));
+    const box = $(lane.box);
+    const ae = document.activeElement;
+    const foc = (ae && ae.tagName === 'TEXTAREA' && box.contains(ae) && ae.closest('.card'))
+      ? { name: ae.closest('.card').dataset.name, s: ae.selectionStart, e: ae.selectionEnd } : null;
+    const anc = anchorCapture();
+    const existing = new Map();
+    [...box.childNodes].forEach(n => {
+      if (n.nodeType === 1 && n.classList.contains('card') && n.dataset.name) existing.set(n.dataset.name, n);
+      else n.remove();  // '…' / '(nothing unread)' placeholders
+    });
+    const keep = new Set();
+    let prev = null;  // last correctly-placed card
+    for (const o of list) {
+      keep.add(o.name);
+      const raw = MDRAW.has(rawKey(lane, o.name));
+      const sig = [o.t, o.imp, o.urg, o.score >= 7 ? 1 : 0, raw ? 1 : 0, (lane.reports && reportOf(o.name)) || '', sigHash(o.text)].join('|');
+      let el = existing.get(o.name);
+      if (!el) {
+        el = document.createElement('div');
+        el.className = 'card' + (lane.key === 'ro' ? ' ro' : '');
+        el.dataset.name = o.name;
+        el.dataset.sig = sig;
+        el.innerHTML = cardContentHTML(lane, o, raw) + cardFormHTML(lane, o.name);
+      } else if (el.dataset.sig !== sig) {
+        const form = el.querySelector('form.reply');  // carry the live form (draft, cursor, undo) over untouched
+        el.dataset.sig = sig;
+        el.innerHTML = cardContentHTML(lane, o, raw);
+        if (form) el.appendChild(form); else el.insertAdjacentHTML('beforeend', cardFormHTML(lane, o.name));
+      }
+      const want = prev ? prev.nextSibling : box.firstChild;
+      if (el !== want) box.insertBefore(el, want);
+      prev = el;
+    }
+    existing.forEach((el, name) => { if (!keep.has(name)) el.remove(); });  // draft (if any) stays in sessionStorage
+    if (!list.length) box.textContent = lane.empty;
+    if (foc) {
+      const t = box.querySelector('.card[data-name="' + CSS.escape(foc.name) + '"] form.reply textarea');
+      if (t && document.activeElement !== t) {
+        t.focus({ preventScroll: true });
+        try { t.selectionStart = foc.s; t.selectionEnd = foc.e; } catch (_) {}
+      }
+    }
+    anchorRestore(anc);
+    anchorMark();
+    box.querySelectorAll('button.mdt').forEach(b => b.onclick = () => {
+      const n = rawKey(lane, b.dataset.name);
+      MDRAW.has(n) ? MDRAW.delete(n) : MDRAW.add(n);
+      renderOutputs(lane, lane.outs);
+    });
+    box.querySelectorAll('form.reply').forEach(f => {
+      const t = f.querySelector('textarea');
+      const dk = cardDraftKey(lane, f.dataset.name);
+      if (!t.value) { const d = sessionStorage.getItem(dk); if (d) t.value = d; }
+      f.onsubmit = (ev) => { ev.preventDefault(); sendReply(lane, f); };
+      t.onkeydown = (e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); f.requestSubmit(); } };
+      t.oninput = () => { t.value ? sessionStorage.setItem(dk, t.value) : sessionStorage.removeItem(dk); };
+      const ab = f.querySelector('button.arch');
+      if (ab) ab.onclick = () => archiveCard(lane, f.dataset.name);
+    });
+  }
+  async function sendReply(lane, f) {
+    const name = f.dataset.name, t = f.querySelector('textarea');
+    const text = t.value.trim();
+    if (!text) return;
+    const o = lane.outs.find(x => x.name === name);
+    const quoted = (o ? o.text : '(original not found)').trimEnd().split('\n').map(l => '> ' + l).join('\n');
+    const body = 'REPLY from operator to ' + lane.replyPath + name + '\n\n' + quoted + '\n\n' + text;
+    $(lane.note).textContent = 'sending reply…';
+    const r = await fetch(lane.ask + '?k=' + K, { method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ text: body }) });
+    const j = await r.json();
+    $(lane.note).textContent = j.ok ? lane.replyMsg(j.name) : 'error: ' + (j.error || r.status);
+    if (j.ok) {
+      t.value = '';
+      sessionStorage.removeItem(cardDraftKey(lane, name));
+      // reply implies done-with-card (operator directive 2026-07-25): auto-archive it,
+      // which also sidesteps the reply-then-scroll-jump annoyance
+      await fetch(lane.archive + '?k=' + K, { method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({ name }) });
+      lane.last = ''; lastIn = ''; lastRoIn = ''; refresh();
+    }
+  }
+  async function archiveCard(lane, name) {
+    sessionStorage.removeItem(cardDraftKey(lane, name));  // archiving with a half-typed draft = deliberate discard
+    await fetch(lane.archive + '?k=' + K, { method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ name }) });
+    lane.last = ''; refresh();
+  }
+  $('f').onsubmit = async (ev) => {
+    ev.preventDefault();
+    const text = $('t').value.trim();
+    if (!text) return;
+    $('note').textContent = 'dropping…';
+    const r = await fetch('/input?k=' + K, { method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ text }) });
+    const j = await r.json();
+    $('note').textContent = j.ok ? 'in input/ as ' + j.name + ' — hit ▶ erg when ready' : 'error: ' + (j.error || r.status);
+    if (j.ok) { $('t').value = ''; sessionStorage.removeItem(draftKey('#main')); }
+    lastIn = ''; refresh();
+  };
+  // '⇄ ask' button on the SAME box — POSTs to /ro-ask, which fires a read-only erg IMMEDIATELY
+  $('ask').onclick = async () => {
+    const text = $('t').value.trim();
+    if (!text) return;
+    $('note').textContent = 'asking…';
+    const r = await fetch('/ro-ask?k=' + K, { method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ text }) });
+    const j = await r.json();
+    $('note').textContent = j.ok ? 'asked as ' + j.name + ' — parallel read-only erg fired (pid ' + j.pid + ')'
+                                 : 'error: ' + (j.error || r.status);
+    if (j.ok) { $('t').value = ''; sessionStorage.removeItem(draftKey('#main')); }
+    lastRoIn = ''; lastRoLog = ''; refresh();
+  };
+  // Enter = drop in (main lane, never auto-runs); Ctrl/Cmd+Enter = ⇄ ask
+  $('t').onkeydown = (e) => {
+    if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); $('ask').click(); }
+    else if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); $('f').requestSubmit(); }
+  };
+  // the shared box survives reloads too
+  $('t').value = sessionStorage.getItem(draftKey('#main')) || '';
+  $('t').oninput = () => { $('t').value ? sessionStorage.setItem(draftKey('#main'), $('t').value) : sessionStorage.removeItem(draftKey('#main')); };
+  $('w').value = localStorage.{{AGENT_NAME}}w || 50;
+  $('w').oninput = () => { localStorage.{{AGENT_NAME}}w = $('w').value; renderOutputs(LANES.main, LANES.main.outs); };
+  $('run').onclick = async () => {
+    $('run').disabled = true;
+    const r = await fetch('/erg?k=' + K, { method: 'POST' });
+    const j = await r.json();
+    $('note').textContent = j.ok ? 'erg fired (pid ' + j.pid + ')' : 'error firing erg';
+    setTimeout(() => { $('run').disabled = false; lastLog=''; refresh(); }, 1200);
+  };
+  refresh();
+  // limits on load: show cache instantly; probe only if it's gone stale (>15 min)
+  fetchLimits(false).then(() => { if (Date.now() - limitsAt > 15 * 60_000) fetchLimits(true, 'stale-on-load'); });
+  // keep the time-elapsed bars creeping while the page sits open: re-render the
+  // last-known data once a minute. Pure client-side — no fetch, no probe, no tokens.
+  setInterval(() => { if (limitsData) renderLimits(limitsData); }, 60_000);
+  setInterval(refresh, 3000);
+  addEventListener('visibilitychange', () => !document.hidden && refresh());
+</script>
+</body></html>
