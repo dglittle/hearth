@@ -6,12 +6,11 @@ PRAGMA journal_mode = WAL;
 
 CREATE TABLE cards (
   id          INTEGER PRIMARY KEY,
-  kind        TEXT NOT NULL,       -- 'mind'|'short-term'|'long-term'|'input'|'output'|'work'|'erg'
-  title       TEXT NOT NULL,       -- one line; replaces the old "first line = summary" rule
+  kind        TEXT NOT NULL,       -- 'mind'|'short-term'|'long-term'|'human'|'{{AGENT_NAME}}'|'erg'|'header'
+  title       TEXT NOT NULL DEFAULT '',  -- one line, OPTIONAL (the operator 2026-07-28); '' = untitled
   body        TEXT NOT NULL DEFAULT '',   -- markdown
   status      TEXT NOT NULL DEFAULT 'draft',
-    -- 'draft'    : being written; ergs MUST NOT act on it
-    -- 'ready'    : actionable — the "ready" flag
+    -- 'draft'    : live — the only pre-done state ('ready' retired 2026-07-28: all ergs explicit)
     -- 'done'     : work complete; kept for chain history
     -- 'archived' : swept off the board
   x REAL, y REAL, w REAL DEFAULT 240, h REAL DEFAULT 96,  -- board geometry; NULL x/y = auto-place

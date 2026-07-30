@@ -35,12 +35,14 @@ run(['init']);
 ok(fs.existsSync(DB), 'init creates db file');
 
 // 2. create + tips basics
-ok(run(['create', '--kind', 'input', '--title', 'card A retail gating', '--status', 'ready',
-  '--imp', '8', '--urg', '7']) === 'created #1', 'create ready input card -> #1');
+ok(run(['create', '--kind', 'human', '--title', 'card A retail gating', '--status', 'ready',
+  '--imp', '8', '--urg', '7']) === 'created #1', 'create human card (ready→draft) -> #1');
 ok(run(['create', '--kind', 'work', '--title', 'draft card D']) === 'created #2',
-  'create draft card -> #2');
+  'create card via legacy kind alias -> #2');
 let tips = run(['tips']);
-ok(tips.includes('#1') && !tips.includes('#2'), 'tips: ready card in, draft card out', tips);
+ok(tips.includes('#1') && tips.includes('#2'), 'tips: both live cards listed (draft = live)', tips);
+ok(tips.includes('[{{AGENT_NAME}}/'), 'legacy kind work aliased to {{AGENT_NAME}}', tips);
+ok(tips.indexOf('#1') < tips.indexOf('#2'), 'higher imp·urg sorts first', tips);
 
 // 3. live child removes parent from tips
 run(['create', '--kind', 'work', '--title', 'card B child of A', '--status', 'ready', '--parent', '1']);

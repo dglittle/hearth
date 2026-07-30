@@ -17,8 +17,12 @@ const path = require('node:path');
 
 const DB_PATH = process.env.CARDS_DB || path.join(__dirname, '..', 'db', 'cards.db');
 const SCHEMA_PATH = path.join(__dirname, '..', 'db', 'schema.sql');
-const KINDS = ['mind', 'short-term', 'long-term', 'input', 'output', 'work', 'erg'];
-const STATUSES = ['draft', 'ready', 'done', 'archived'];
+const KINDS = ['mind', 'short-term', 'long-term', 'human', '{{AGENT_NAME}}', 'erg', 'header'];
+// two-kind interface (the operator 2026-07-29, card #275): lower-right = human + {{AGENT_NAME}} only;
+// old input/output/work kinds retired — aliases keep stray callers working.
+const KIND_ALIAS = { input: 'human', output: '{{AGENT_NAME}}', work: '{{AGENT_NAME}}' };
+const STATUSES = ['draft', 'done', 'archived'];  // 'ready' retired 2026-07-28 (all ergs explicit); 'draft' = live
+const normStatus = (s) => (s === 'ready' ? 'draft' : s);  // back-compat for stray callers
 const STALE_LOCK_MIN = 60;
 
 function now() { return new Date().toISOString().replace(/\.\d+Z$/, 'Z'); }
@@ -82,8 +86,8 @@ function pidAlive(pid) {
 
 const TIPS_SQL = `
   SELECT c.* FROM cards c
-  WHERE c.status = 'ready' AND c.lock_erg IS NULL
-    AND c.kind IN ('input','work','output','short-term')
+  WHERE c.status = 'draft' AND c.lock_erg IS NULL
+    AND c.kind IN ('human','{{AGENT_NAME}}','short-term')
     AND NOT EXISTS (
       SELECT 1 FROM links l JOIN cards ch ON ch.id = l.child
       WHERE l.parent = c.id AND l.kind = 'child'
@@ -139,10 +143,11 @@ const commands = {
 
   create({ flags }) {
     const db = openDb();
-    const kind = String(flags.kind || '');
+    let kind = String(flags.kind || '');
+    kind = KIND_ALIAS[kind] || kind;
     if (!KINDS.includes(kind)) die(`--kind must be one of: ${KINDS.join(' ')}`);
-    if (!flags.title || flags.title === true) die('--title required');
-    const status = flags.status ? String(flags.status) : 'draft';
+    const title = (flags.title === undefined || flags.title === true) ? '' : String(flags.title);
+    const status = flags.status ? normStatus(String(flags.status)) : 'draft';
     if (!STATUSES.includes(status)) die(`--status must be one of: ${STATUSES.join(' ')}`);
     const t = now();
     db.exec('BEGIN IMMEDIATE');
@@ -150,7 +155,7 @@ const commands = {
       const r = db.prepare(
         `INSERT INTO cards(kind,title,body,status,x,y,importance,urgency,url,created_by,created_at,updated_at)
          VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`).run(
-        kind, String(flags.title), flags.body !== undefined ? readBody(flags.body) : '',
+        kind, title, flags.body !== undefined ? readBody(flags.body) : '',
         status,
         flags.x !== undefined ? Number(flags.x) : null,
         flags.y !== undefined ? Number(flags.y) : null,
@@ -177,7 +182,9 @@ const commands = {
     if (flags.url !== undefined) { sets.push('url = ?'); vals.push(String(flags.url)); }
     if (flags.imp !== undefined) { sets.push('importance = ?'); vals.push(intArg(flags.imp, '--imp')); }
     if (flags.urg !== undefined) { sets.push('urgency = ?'); vals.push(intArg(flags.urg, '--urg')); }
-    if (!sets.length) die('nothing to edit (--title/--body/--url/--imp/--urg)');
+    if (flags.x !== undefined) { sets.push('x = ?'); vals.push(intArg(flags.x, '--x')); }
+    if (flags.y !== undefined) { sets.push('y = ?'); vals.push(intArg(flags.y, '--y')); }
+    if (!sets.length) die('nothing to edit (--title/--body/--url/--imp/--urg/--x/--y)');
     sets.push('updated_at = ?'); vals.push(now(), id);
     db.prepare(`UPDATE cards SET ${sets.join(', ')} WHERE id = ?`).run(...vals);
     console.log(`edited #${id}`);
@@ -186,10 +193,11 @@ const commands = {
   status({ pos }) {
     const db = openDb();
     const id = intArg(pos[0], 'id');
-    const st = String(pos[1] || '');
+    const st = normStatus(String(pos[1] || ''));
     if (!STATUSES.includes(st)) die(`status must be one of: ${STATUSES.join(' ')}`);
     getCard(db, id);
-    db.prepare('UPDATE cards SET status = ?, updated_at = ? WHERE id = ?').run(st, now(), id);
+    if (st === 'archived') archiveCard(db, id);  // status + geometry agree (design §3)
+    else db.prepare('UPDATE cards SET status = ?, updated_at = ? WHERE id = ?').run(st, now(), id);
     console.log(`#${id} -> ${st}`);
   },
 
@@ -264,6 +272,20 @@ const commands = {
     for (const c of rows) console.log(line(c));
   },
 
+  // archive a whole thread (design §3, spec frozen erg 135; same logic as web/server.js)
+  'archive-thread'({ pos }) {
+    const db = openDb();
+    const id = intArg(pos[0], 'id');
+    getCard(db, id);
+    db.exec('BEGIN IMMEDIATE');
+    try {
+      const r = archiveThread(db, id);
+      db.exec('COMMIT');
+      console.log(`archived ${r.archived.length}: ${r.archived.map(i => '#' + i).join(' ') || '(none)'}`);
+      if (r.kept.length) console.log(`kept (live parent outside thread): ${r.kept.map(i => '#' + i).join(' ')}`);
+    } catch (e) { db.exec('ROLLBACK'); die(e.message); }
+  },
+
   reap() { const db = openDb(); reap(db, false); },
 
   // --- erg lifecycle (used by erg.js in M3; here for lock ownership + tests) ---
@@ -294,6 +316,63 @@ const commands = {
   },
 };
 
+// ---- archive-thread internals (kept in sync with web/server.js) ----
+// Closure = ancestors(start) ∪ descendants(start) over 'child' links — DIRECTIONAL,
+// not the connected component (else the guard below could never fire). Guard: a
+// member with a live (non-archived) parent OUTSIDE the closure is kept; iterated
+// to fixpoint so a kept card's exclusive descendants stay with it.
+const AG = { x0: -2240, cols: 8, dx: 280, y0: 700, dy: 180 };  // M2c archive grid
+function nextArchiveSlot(db) {
+  const taken = db.prepare(
+    `SELECT x, y FROM cards WHERE status = 'archived' AND x < 0 AND y > 0`).all();
+  const occ = new Set(taken.map(c =>
+    Math.round((c.x - AG.x0) / AG.dx) + ':' + Math.round((c.y - AG.y0) / AG.dy)));
+  for (let row = 0; row < 10000; row++)
+    for (let col = 0; col < AG.cols; col++)
+      if (!occ.has(col + ':' + row)) return { x: AG.x0 + col * AG.dx, y: AG.y0 + row * AG.dy };
+  return { x: AG.x0, y: AG.y0 };
+}
+function archiveCard(db, id) {   // status + geometry agree (design §3)
+  const c = db.prepare('SELECT x, y FROM cards WHERE id = ?').get(id);
+  const inQuadrant = c && c.x != null && c.x < 0 && c.y != null && c.y > 0;
+  const slot = inQuadrant ? null : nextArchiveSlot(db);
+  db.prepare(`UPDATE cards SET status = 'archived', updated_at = ?` +
+             (slot ? ', x = ?, y = ?' : '') + ' WHERE id = ?')
+    .run(...(slot ? [now(), slot.x, slot.y, id] : [now(), id]));
+}
+function threadClosure(db, id) {
+  const seen = new Set([id]);
+  const up = db.prepare(`SELECT parent AS o FROM links WHERE child = ? AND kind = 'child'`);
+  const down = db.prepare(`SELECT child AS o FROM links WHERE parent = ? AND kind = 'child'`);
+  for (const stmt of [up, down]) {
+    const queue = [id];
+    while (queue.length)
+      for (const r of stmt.all(queue.pop()))
+        if (!seen.has(r.o)) { seen.add(r.o); queue.push(r.o); }
+  }
+  return seen;
+}
+function archiveThread(db, id) {
+  const closure = threadClosure(db, id);
+  const parentsOf = db.prepare(
+    `SELECT p.id, p.status FROM links l JOIN cards p ON p.id = l.parent
+     WHERE l.child = ? AND l.kind = 'child'`);
+  const kept = new Set();
+  for (let changed = true; changed;) {
+    changed = false;
+    for (const cid of closure) {
+      if (kept.has(cid)) continue;
+      const liveOutside = parentsOf.all(cid).some(p =>
+        (!closure.has(p.id) || kept.has(p.id)) && p.status !== 'archived');
+      if (liveOutside) { kept.add(cid); changed = true; }
+    }
+  }
+  const archived = [];
+  for (const cid of closure)
+    if (!kept.has(cid)) { archiveCard(db, cid); archived.push(cid); }
+  return { archived: archived.sort((a, b) => a - b), kept: [...kept].sort((a, b) => a - b) };
+}
+
 // clear locks whose erg pid is dead or lock_at stale; mark those ergs failed (design §2)
 function reap(db, quiet) {
   const held = db.prepare(
@@ -319,13 +398,14 @@ function reap(db, quiet) {
 // ------------------------------------------------------------------- main ---
 const HELP = `card — sqlite card-board CLI (db: ${DB_PATH})
   card init                                   create/verify the db
-  card tips                                   ready, unlocked, childless work cards
+  card tips                                   live, unlocked, childless work cards
   card show <id>                              card + body + parent chain (3) + children
-  card create --kind K --title T [--body B|-] [--parent id]... [--ref id]...
-              [--status draft|ready] [--imp N] [--urg N] [--url U] [--x N --y N] [--by WHO]
-  card edit <id> [--title T] [--body B|-] [--url U] [--imp N] [--urg N]
-  card status <id> draft|ready|done|archived
+  card create --kind K [--title T] [--body B|-] [--parent id]... [--ref id]...
+              [--imp N] [--urg N] [--url U] [--x N --y N] [--by WHO]
+  card edit <id> [--title T] [--body B|-] [--url U] [--imp N] [--urg N] [--x N --y N]
+  card status <id> draft|done|archived        ('draft' = live; 'ready' retired, accepted as alias)
   card link <parent> <child> [--kind child|ref] · card unlink <parent> <child>
+  card archive-thread <id>  archive ancestors+descendants (shared live cards kept) + grid move
   card lock <id...>        atomic all-or-nothing; needs ERG_ID env or --erg (exit 2 = conflict)
   card unlock [id...]      no ids = release everything this erg holds
   card search <regex>      case-insensitive over title+body

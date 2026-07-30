@@ -13,41 +13,15 @@ web/key.txt
 
 # --- living state ---
 erg.log
-ro/ro.log
 web/web.log
 ergs.jsonl
-ro/ergs.jsonl
 ergs/
-ro/ergs/
-ro/running/
 db/cards.db
 db/cards.db-wal
 db/cards.db-shm
 tok-pref.json
 web/limits.json
 work/
-
-# --- mail in flight (structure is tracked via .gitkeep, contents are not) ---
-input/**
-!input/.gitkeep
-!input/processed/
-!input/processed/.gitkeep
-output/**
-!output/.gitkeep
-!output/processed/
-!output/processed/.gitkeep
-ro/input/**
-!ro/input/.gitkeep
-!ro/input/processed/
-!ro/input/processed/.gitkeep
-ro/output/**
-!ro/output/.gitkeep
-!ro/output/processed/
-!ro/output/processed/.gitkeep
-
-# --- an agent's own memory: seeded once, then hers ---
-short-term/**
-!short-term/.gitkeep
 
 # --- junk ---
 *.bak

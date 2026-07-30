@@ -1,31 +1,29 @@
 #!/usr/bin/env node
 // erg.js — {{AGENT_NAME}} performs one erg (one unit of work) against the card-board.
 //
-// Card-board edition (design: work/card-board/design.md §5). Continuity lives
-// in db/cards.db; each erg is a fresh, bare-bones `claude -p` session — no
-// CLAUDE.md, no skills, no auto-memory.
+// Card-board edition, §5b model (design: work/card-board/design.md §5 + §5b).
+// Continuity lives in db/cards.db; each erg is a fresh, bare-bones `claude -p`
+// session — no CLAUDE.md, no skills, no auto-memory.
 //
-//   system prompt = mind cards (board order: x then y) + ready-tips index
-//                   + harness facts (erg id, card CLI help)
-//   targeted mode = full target card + parent chain in the user prompt,
-//                   with a lock-first instruction
+// erg↔card model (operator directive 2026-07-28 12:47Z + 13:01Z):
+//   - Every erg is fired ON one or more parent cards (`--card N [--card M …]`).
+//     There is NO generic no-target mode.
+//   - erg.js locks all parent cards atomically (exit 2 if another erg holds
+//     any), then creates ONE output card as child of ALL parents, and tells
+//     the session "card #K is yours". No separate in-flight info card — the
+//     output card IS the live indicator.
+//   - Progress mirroring = the session directly edits its own card
+//     (`card edit`); erg.js does no log polling. The session may also create
+//     additional cards mid-flight.
+//   - On exit erg.js appends a cost line (wall · model · tokens · usd) to the
+//     card body, finalizes title/status only if the session left the
+//     placeholder, releases locks. costs row + ergs.jsonl kept as silent
+//     ledger; transcript jsonl copied to the ergs/ FOLDER (never sqlite).
 //
-// Parallelism: ergs are NOT serialized anymore — WAL + advisory card locks
-// (`card lock`, all-or-nothing, exit 2 on conflict) make concurrent ergs safe.
-// The old erg.lock file is gone.
-//
-// While running, erg.js maintains an in-flight `kind='erg'` info card whose
-// title tracks the session's latest "[erg] PLAN:/STEP:/NOTE:/DONE:" line in
-// erg.log; on exit it becomes the DONE line (status 'done') or is deleted if
-// no session ever launched. Costs land in the `costs` table; the full jsonl
-// transcript is copied to the ergs/ FOLDER (never into sqlite — operator
-// directive).
-//
-// Usage: node erg.js [--card N] ["optional extra context for this erg"]
-//   --card N  = targeted erg on card #N (session still locks it itself)
+// Usage: node erg.js --card N [--card M ...] ["optional extra context"]
 // Env: CARDS_DB overrides db path (tests); ERG_CLAUDE_BIN overrides the
 //   claude binary AND skips the budget probe (test mode).
-// Log: erg.log   Ledger: ergs.jsonl (kept alongside the costs table)
+// Log: erg.log (harness lines only)   Ledger: ergs.jsonl (+ costs table)
 
 'use strict';
 process.removeAllListeners('warning');
@@ -57,24 +55,29 @@ const MODEL = 'claude-fable-5';
 const FALLBACK_MODEL = 'claude-opus-5'; // when fable weekly budget is dry (the operator 2026-07-27)
 const TOOLS = 'Bash,Read,Edit,Write,Glob,Grep,WebFetch,WebSearch,TodoWrite';
 const TIMEOUT_MS = 30 * 60_000;
-const POLL_MS = 3000;               // in-flight info-card title refresh cadence
 
 const log = (m) => { const l = new Date().toISOString() + ' [' + process.pid + '] ' + m; console.log(l); fs.appendFileSync(LOG, l + '\n'); };
 const fmtDur = (ms) => { const s = Math.round(ms / 1000); return s < 60 ? s + 's' : Math.floor(s / 60) + 'm' + String(s % 60).padStart(2, '0') + 's'; };
 const fmtTok = (n) => n < 1000 ? String(n) : n < 1e6 ? (n / 1e3).toFixed(n < 1e4 ? 1 : 0) + 'k' : (n / 1e6).toFixed(2) + 'M';
 const nowIso = () => new Date().toISOString().replace(/\.\d+Z$/, 'Z');
 
-// ---- args: --card N (targeted), rest = extra context ----
-let targetCard = null; const restArgs = [];
+// ---- args: one or more --card N (parents; REQUIRED), rest = extra context ----
+const parents = []; const restArgs = [];
 for (let i = 2; i < process.argv.length; i++) {
   if (process.argv[i] === '--card') {
-    targetCard = parseInt(process.argv[++i], 10);
-    if (!Number.isInteger(targetCard)) { console.error('erg.js: --card needs an integer'); process.exit(1); }
+    const n = parseInt(process.argv[++i], 10);
+    if (!Number.isInteger(n)) { console.error('erg.js: --card needs an integer'); process.exit(1); }
+    parents.push(n);
   } else restArgs.push(process.argv[i]);
+}
+if (!parents.length) {
+  console.error('erg.js: at least one --card N is required (generic ergs are gone — §5b).');
+  console.error('usage: node erg.js --card N [--card M ...] ["extra context"]');
+  process.exit(1);
 }
 const extra = restArgs.join(' ').trim();
 
-// ---- db (direct handle for reads + info-card/costs writes; CLI for lifecycle) ----
+// ---- db (direct handle for reads + finalize writes; CLI for lifecycle) ----
 const db = new DatabaseSync(DB_PATH);
 db.exec('PRAGMA busy_timeout = 10000; PRAGMA foreign_keys = ON;');
 
@@ -87,26 +90,45 @@ function cardCli(args) {
 // 1. reap stale locks (dead-pid / >60min) before anything else
 { const r = cardCli(['reap']); if (r.status !== 0) log('reap failed: ' + r.err); }
 
-// 2. register the erg (pid = this process, for liveness-based reaping)
-const startArgs = targetCard != null
-  ? ['erg-start', '--target', String(targetCard), '--pid', String(process.pid)]
-  : ['erg-start', '--mode', 'generic', '--pid', String(process.pid)];
-const startRes = cardCli(startArgs);
+// 2. verify the parent cards exist
+for (const p of parents) {
+  const row = db.prepare('SELECT id FROM cards WHERE id = ?').get(p);
+  if (!row) { console.error('erg.js: card #' + p + ' not found'); process.exit(1); }
+}
+
+// 3. register the erg (pid = this process, for liveness-based reaping)
+const startRes = cardCli(['erg-start', '--mode', 'targeted', '--target', String(parents[0]), '--pid', String(process.pid)]);
 const ERG = parseInt(startRes.out, 10);
 if (!Number.isInteger(ERG)) { console.error('erg.js: erg-start failed: ' + startRes.err); process.exit(1); }
 
-// 3. in-flight info card (design §2): child of the target when targeted
-let infoCard = null;
+// 4. lock ALL parents atomically (all-or-nothing; exit 2 = another erg holds one)
 {
-  const args = ['create', '--kind', 'erg', '--status', 'ready',
-    '--title', '⚙ erg #' + ERG + ' working: (starting)', '--by', 'erg:' + ERG];
-  if (targetCard != null) args.push('--parent', String(targetCard));
+  const r = cardCli(['lock', ...parents.map(String), '--erg', String(ERG)]);
+  if (r.status !== 0) {
+    cardCli(['erg-end', String(ERG), '--status', 'failed', '--result',
+      'lock refused on card(s) ' + parents.join(',') + ' — another erg holds one']);
+    log('ERG #' + ERG + ' ABORTED — lock conflict on card(s) ' + parents.join(','));
+    process.exit(2);
+  }
+}
+
+// 5. the ONE output card (§5b): child of ALL parents, live indicator while running
+let outCard = null;
+{
+  const args = ['create', '--kind', '{{AGENT_NAME}}', '--status', 'draft',
+    '--title', '⚙ erg #' + ERG + ' working on #' + parents.join(',#') + ' …',
+    '--by', 'erg:' + ERG];
+  for (const p of parents) args.push('--parent', String(p));
   const r = cardCli(args);
   const m = r.out.match(/created #(\d+)/);
   if (m) {
-    infoCard = parseInt(m[1], 10);
-    db.prepare('UPDATE ergs SET info_card = ? WHERE id = ?').run(infoCard, ERG);
-  } else log('info card create failed: ' + (r.err || r.out));
+    outCard = parseInt(m[1], 10);
+    db.prepare('UPDATE ergs SET info_card = ? WHERE id = ?').run(outCard, ERG);
+  } else {
+    cardCli(['erg-end', String(ERG), '--status', 'failed', '--result', 'output card create failed']);
+    console.error('erg.js: output card create failed: ' + (r.err || r.out));
+    process.exit(1);
+  }
 }
 
 // ---- system prompt: mind cards + ready-tips index + harness facts ----
@@ -118,11 +140,22 @@ function buildSystemPrompt() {
   for (const c of minds)
     parts.push('━━━ mind card #' + c.id + ' — ' + c.title + ' ━━━\n' + String(c.body).trim());
   const tips = cardCli(['tips']).out;
-  parts.push('━━━ ready tips — the work queue (`card show <id>` for detail; `card lock <id>` before working) ━━━\n' +
-    (tips || '(no ready tips)'));
+  parts.push('━━━ tips — the wider board (context only; your work is your target cards) ━━━\n' +
+    (tips || '(no tips)'));
   parts.push('━━━ this erg — harness facts ━━━\n' +
     'You are erg:' + ERG + '. ERG_ID=' + ERG + ' is set in your environment, so the card CLI ' +
     'attributes your locks and creations automatically.\n' +
+    'Your parent card(s) #' + parents.join(', #') + ' are ALREADY LOCKED for you; locks release when you exit.\n' +
+    'Card #' + outCard + ' is YOURS — your final output goes there:\n' +
+    '  - While working, edit it to share progress (the operator watches the board live):\n' +
+    '    `card edit ' + outCard + ' --title "⚙ erg #' + ERG + ': <what you are doing now>"`\n' +
+    '  - Before exiting, finalize it: title = one-sentence result, body = the deliverable\n' +
+    '    (markdown, self-contained, links included), plus `--imp N --urg N` (1-10).\n' +
+    '  - You MAY create additional cards (e.g. split deliverables, new asks) with\n' +
+    '    `card create` — link them sensibly (children of #' + outCard + ' or of other cards).\n' +
+    '  - If the work is unfinished, say so at the end of the card body ("got this far,\n' +
+    '    more to do: …") — the operator fires a continuation erg on your card to extend the chain.\n' +
+    'Do NOT create files for output — the card IS the deliverable.\n' +
     'Card CLI: `' + process.execPath + ' tools/card.js <cmd>` (cwd is the home dir). Help:\n' +
     cardCli(['help']).out);
   return parts.join('\n\n');
@@ -187,36 +220,14 @@ function runClaude(args, env) {
   });
 }
 
-// ---- in-flight info-card updater: mirror the session's latest [erg] log line ----
-const logStart = (() => { try { return fs.statSync(LOG).size; } catch (_) { return 0; } })();
-function latestErgLine() {
-  let txt = '';
-  try { txt = fs.readFileSync(LOG, 'utf8').slice(logStart); } catch (_) { return null; }
-  const ms = txt.match(/\[erg\] (?:PLAN|STEP|NOTE|DONE):.*$/gm);
-  return ms && ms.length ? ms[ms.length - 1].replace(/^\[erg\] /, '') : null;
-}
-let lastTitle = null;
-function refreshInfoCard() {
-  if (infoCard == null) return;
-  const l = latestErgLine();
-  if (!l) return;
-  const title = ('⚙ erg #' + ERG + ' working: ' + l).slice(0, 200);
-  if (title === lastTitle) return;
-  lastTitle = title;
-  try { db.prepare('UPDATE cards SET title = ?, updated_at = ? WHERE id = ?').run(title, nowIso(), infoCard); }
-  catch (_) {}
-}
-
 // ------------------------------------------------------------------- main ---
 (async () => {
   const promptTs = '[erg ' + new Date().toISOString().slice(0, 16) + 'Z] ';
-  let prompt = promptTs + 'Perform one erg.';
-  if (targetCard != null) {
-    const shown = cardCli(['show', String(targetCard)]);
-    if (shown.status !== 0) { log('ERG FAILED — target card #' + targetCard + ' not found'); await finalize(false, { result: 'target card #' + targetCard + ' not found' }, null, Date.now(), false, 'no-session'); process.exit(1); }
-    prompt += '\n\nTARGETED ERG on card #' + targetCard + '. Lock it FIRST (`card lock ' +
-      targetCard + '`) — a parallel erg may already hold it; if the lock is refused (exit 2), ' +
-      'just report that and end. The card and its chain:\n\n' + shown.out;
+  let prompt = promptTs + 'Perform one erg on card' + (parents.length > 1 ? 's' : '') +
+    ' #' + parents.join(', #') + '. Your output card is #' + outCard + ' (see harness facts).';
+  for (const p of parents) {
+    const shown = cardCli(['show', String(p)]);
+    prompt += '\n\n── target card #' + p + ' and its chain ──\n' + (shown.status === 0 ? shown.out : '(show failed: ' + shown.err + ')');
   }
   if (extra) prompt += '\n\n' + extra;
   const sysPrompt = buildSystemPrompt();
@@ -228,102 +239,108 @@ function refreshInfoCard() {
   for (const m of [MODEL, FALLBACK_MODEL]) for (const s of SLOT_ORDER) PLAN.push({ slot: s, model: m });
   if (!PLAN.length) PLAN.push({ slot: 1, model: MODEL });   // no tokens configured — rely on ambient auth
 
-  const poller = setInterval(refreshInfoCard, POLL_MS);
   let r, res, ok = false, sid, t0 = Date.now(), tokSlot = 1, model = MODEL, ran = false;
   const skipped = [];
-  try {
-    for (let attempt = 0; attempt < PLAN.length; attempt++) {
-      tokSlot = PLAN[attempt].slot; model = PLAN[attempt].model;
-      if (TOKS[tokSlot - 1] && !modelAllowed(TOKS[tokSlot - 1], model)) {
-        skipped.push(model + '@tok' + tokSlot);
-        log('budget probe: ' + model + ' rejected on token ' + tokSlot + ' — skipping');
-        continue;
-      }
-      sid = crypto.randomUUID();
-      const env = { ...baseEnv };
-      if (TOKS[tokSlot - 1]) env.CLAUDE_CODE_OAUTH_TOKEN = TOKS[tokSlot - 1];
-      const args = ['-p', prompt, '--output-format', 'json',
-        '--model', model,
-        '--setting-sources', 'user',            // no project source → no CLAUDE.md
-        '--disable-slash-commands',             // no skills
-        '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}',
-        '--allowedTools', TOOLS, '--permission-mode', 'dontAsk',
-        '--system-prompt', sysPrompt,
-        '--session-id', sid];
-      t0 = Date.now(); ran = true;
-      log('erg #' + ERG + ' begins ' + sid +
-        (targetCard != null ? ' [targeted #' + targetCard + ']' : '') +
-        (model !== MODEL ? ' [' + model + ' — fable budget dry]' : '') +
-        (attempt ? ' (RETRY on token ' + tokSlot + ' after limit)'
-                 : (tokSlot !== 1 ? ' [token ' + tokSlot + ', remembered]' : '')) +
-        (extra ? ' :: ' + extra.slice(0, 100).replace(/\n/g, ' ') : ''));
-      r = await runClaude(args, env);
-      res = null; try { res = JSON.parse(r.stdout); } catch (_) {}
-      ok = !!res && !res.is_error && r.status === 0;
-      if (ok) break;
-      const errTxt = (((res && res.result) || '') + ' ' + (r.stderr || '')).slice(0, 2000);
-      if (attempt + 1 < PLAN.length && LIMIT_RE.test(errTxt)) {
-        const nxt = PLAN[attempt + 1];
-        log('LIMIT HIT on ' + model + '/token ' + tokSlot + ' — retrying whole erg on ' +
-          nxt.model + '/token ' + nxt.slot +
-          ' :: ' + errTxt.trim().slice(0, 200).replace(/\n/g, ' '));
-        fs.appendFileSync(LEDGER, JSON.stringify({ erg: ERG, sid, start: new Date(t0).toISOString(),
-          ms: Date.now() - t0, ok: false, limitHit: true, tokSlot, model,
-          extra: extra.slice(0, 120) || undefined }) + '\n');
-        continue;
-      }
-      break;
+  for (let attempt = 0; attempt < PLAN.length; attempt++) {
+    tokSlot = PLAN[attempt].slot; model = PLAN[attempt].model;
+    if (TOKS[tokSlot - 1] && !modelAllowed(TOKS[tokSlot - 1], model)) {
+      skipped.push(model + '@tok' + tokSlot);
+      log('budget probe: ' + model + ' rejected on token ' + tokSlot + ' — skipping');
+      continue;
     }
-    if (!ran) {
-      res = { result: 'no attempt made: all (token, model) pairs rejected by budget probe [' + skipped.join(', ') + ']' };
-      ok = false; sid = sid || 'no-session';
+    sid = crypto.randomUUID();
+    const env = { ...baseEnv };
+    if (TOKS[tokSlot - 1]) env.CLAUDE_CODE_OAUTH_TOKEN = TOKS[tokSlot - 1];
+    const args = ['-p', prompt, '--output-format', 'json',
+      '--model', model,
+      '--setting-sources', 'user',            // no project source → no CLAUDE.md
+      '--disable-slash-commands',             // no skills
+      '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}',
+      '--allowedTools', TOOLS, '--permission-mode', 'dontAsk',
+      '--system-prompt', sysPrompt,
+      '--session-id', sid];
+    t0 = Date.now(); ran = true;
+    log('erg #' + ERG + ' begins ' + sid + ' [cards #' + parents.join(',#') + ' → out #' + outCard + ']' +
+      (model !== MODEL ? ' [' + model + ' — fable budget dry]' : '') +
+      (attempt ? ' (RETRY on token ' + tokSlot + ' after limit)'
+               : (tokSlot !== 1 ? ' [token ' + tokSlot + ', remembered]' : '')) +
+      (extra ? ' :: ' + extra.slice(0, 100).replace(/\n/g, ' ') : ''));
+    r = await runClaude(args, env);
+    res = null; try { res = JSON.parse(r.stdout); } catch (_) {}
+    ok = !!res && !res.is_error && r.status === 0;
+    if (ok) break;
+    const errTxt = (((res && res.result) || '') + ' ' + (r.stderr || '')).slice(0, 2000);
+    if (attempt + 1 < PLAN.length && LIMIT_RE.test(errTxt)) {
+      const nxt = PLAN[attempt + 1];
+      log('LIMIT HIT on ' + model + '/token ' + tokSlot + ' — retrying whole erg on ' +
+        nxt.model + '/token ' + nxt.slot +
+        ' :: ' + errTxt.trim().slice(0, 200).replace(/\n/g, ' '));
+      fs.appendFileSync(LEDGER, JSON.stringify({ erg: ERG, sid, start: new Date(t0).toISOString(),
+        ms: Date.now() - t0, ok: false, limitHit: true, tokSlot, model,
+        extra: extra.slice(0, 120) || undefined }) + '\n');
+      continue;
     }
-    // sticky token memory
-    if (ok && tokSlot !== prefSlot) log('token memory: next ergs start on token ' + tokSlot);
-    if (ok) { try { fs.writeFileSync(PREF_FILE, JSON.stringify({ slot: tokSlot, at: new Date().toISOString() }) + '\n'); } catch (_) {} }
-  } finally {
-    clearInterval(poller);
+    break;
   }
+  if (!ran) {
+    res = { result: 'no attempt made: all (token, model) pairs rejected by budget probe [' + skipped.join(', ') + ']' };
+    ok = false; sid = sid || 'no-session';
+  }
+  // sticky token memory
+  if (ok && tokSlot !== prefSlot) log('token memory: next ergs start on token ' + tokSlot);
+  if (ok) { try { fs.writeFileSync(PREF_FILE, JSON.stringify({ slot: tokSlot, at: new Date().toISOString() }) + '\n'); } catch (_) {} }
   await finalize(ok, res, r, t0, ran, sid, tokSlot, model);
   process.exitCode = ok ? 0 : 1;
 })();
 
-// ---- finalize: costs row, erg row + lock release, info card, transcript, log ----
+// ---- finalize: costs row, erg row + lock release, output card, transcript ----
 async function finalize(ok, res, r, t0, ran, sid, tokSlot = 1, model = MODEL) {
   const u = (res && res.usage) || null;
   const tok = u ? { in: (u.input_tokens || 0), cached: (u.cache_read_input_tokens || 0) + (u.cache_creation_input_tokens || 0), out: (u.output_tokens || 0) } : null;
-  // result line: the session's DONE: log line if present, else its final text
-  const doneLine = (latestErgLine() || '').startsWith('DONE:') ? latestErgLine() : null;
-  const resultLine = (doneLine || String((res && res.result) || (r && r.stderr) || 'no output')
-    .replace(/\n/g, ' ')).slice(0, 300);
+  const usd = (res && res.total_cost_usd) != null ? res.total_cost_usd : null;
+  const resultLine = String((res && res.result) || (r && r.stderr) || 'no output')
+    .replace(/\n/g, ' ').slice(0, 300);
 
-  // costs table (the claude-p cost log)
+  // costs table (the claude-p cost log — silent ledger, no UI panel)
   if (ran) try {
     db.prepare(`INSERT OR REPLACE INTO costs(erg_id,wall_seconds,model,input_tokens,output_tokens,cache_read,cache_write,usd)
                 VALUES(?,?,?,?,?,?,?,?)`).run(
       ERG, (Date.now() - t0) / 1000, model,
       u ? (u.input_tokens || 0) : null, u ? (u.output_tokens || 0) : null,
-      u ? (u.cache_read_input_tokens || 0) : null, u ? (u.cache_creation_input_tokens || 0) : null,
-      (res && res.total_cost_usd) != null ? res.total_cost_usd : null);
+      u ? (u.cache_read_input_tokens || 0) : null, u ? (u.cache_creation_input_tokens || 0) : null, usd);
   } catch (e) { log('costs write failed: ' + e.message); }
 
   // erg row → done/failed + release every lock this erg still holds
   { const er = cardCli(['erg-end', String(ERG), '--status', ok ? 'done' : 'failed', '--result', resultLine]);
     if (er.status !== 0) log('erg-end failed: ' + er.err); }
 
-  // info card: DONE line + status done (visible ~a day, board auto-archives),
-  // or deleted outright if no session ever launched
-  if (infoCard != null) try {
-    if (!ran) db.prepare('DELETE FROM cards WHERE id = ?').run(infoCard);
-    else db.prepare('UPDATE cards SET title = ?, status = ?, updated_at = ? WHERE id = ?').run(
-      ((ok ? '✅' : '✗') + ' erg #' + ERG + ': ' + resultLine).slice(0, 200), 'done', nowIso(), infoCard);
-  } catch (e) { log('info card finalize failed: ' + e.message); }
+  // the output card (§5b): if no session ever launched, delete it; else
+  // finalize title/status ONLY where the session left the placeholder, and
+  // append the cost line to the body.
+  if (outCard != null) try {
+    if (!ran) db.prepare('DELETE FROM cards WHERE id = ?').run(outCard);
+    else {
+      const c = db.prepare('SELECT title, body, status FROM cards WHERE id = ?').get(outCard);
+      if (c) {
+        const placeholder = c.title.startsWith('⚙ erg #' + ERG);
+        const title = placeholder
+          ? ((ok ? '✅' : '✗') + ' erg #' + ERG + ': ' + resultLine).slice(0, 200)
+          : (ok ? c.title : ('✗ ' + c.title).slice(0, 200));
+        const status = c.status;   // 'ready' retired 2026-07-28: 'draft' IS the live status, no flip needed
+        const costLine = '\n\n⏱ ' + fmtDur(Date.now() - t0) + ' · ' + model +
+          (tok ? ' · ' + fmtTok(tok.in + tok.cached) + ' in (' + fmtTok(tok.cached) + ' cached) / ' + fmtTok(tok.out) + ' out' : '') +
+          (usd != null ? ' · $' + usd.toFixed(2) : '');
+        db.prepare('UPDATE cards SET title = ?, status = ?, body = ?, updated_at = ? WHERE id = ?')
+          .run(title, status, String(c.body || '') + costLine, nowIso(), outCard);
+      }
+    }
+  } catch (e) { log('output card finalize failed: ' + e.message); }
 
   // ledger (kept alongside the costs table)
   fs.appendFileSync(LEDGER, JSON.stringify({ erg: ERG, sid, start: new Date(t0).toISOString(),
-    ms: Date.now() - t0, cost: (res && res.total_cost_usd) != null ? res.total_cost_usd : null,
+    ms: Date.now() - t0, cost: usd,
     turns: (res && res.num_turns) != null ? res.num_turns : null,
-    tok, ok, target: targetCard != null ? targetCard : undefined,
+    tok, ok, cards: parents, out: outCard,
     tokSlot: tokSlot > 1 ? tokSlot : undefined,
     model: model !== MODEL ? model : undefined,
     extra: extra.slice(0, 120) || undefined }) + '\n');
@@ -343,7 +360,7 @@ async function finalize(ok, res, r, t0, ran, sid, tokSlot = 1, model = MODEL) {
     (tokSlot > 1 ? ' [token ' + tokSlot + ']' : '') +
     (model !== MODEL ? ' [' + model + ']' : '') +
     ' — took ' + fmtDur(Date.now() - t0) +
-    ', cost ' + ((res && res.total_cost_usd) != null ? '$' + res.total_cost_usd.toFixed(2) : '$?') +
+    ', cost ' + (usd != null ? '$' + usd.toFixed(2) : '$?') +
     ((res && res.num_turns) != null ? ' (' + res.num_turns + ' turns)' : '') +
     (tok ? ', tok ' + fmtTok(tok.in + tok.cached) + ' in (' + fmtTok(tok.cached) + ' cached) / ' + fmtTok(tok.out) + ' out' : '') +
     (ok ? '' : ' :: ' + (((res && res.result) || (r && r.stderr) || 'exit ' + (r && r.status)) + '').slice(0, 300)));
