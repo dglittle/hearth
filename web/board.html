@@ -156,11 +156,12 @@
   body.panel-open #panel { display:block; }
   body.panel-open #bar { right:50vw; }
   body.panel-open #viewport { right:50vw; }
-  body.panel-open #abar { left:25vw; }
+  /* (no #abar override here: while the panel is open the action bar lives
+     INSIDE it — reparented by updateBars(), styled by #panel #abar below —
+     operator directive 2026-07-31, #676) */
   @media (max-width:680px) {              /* phone: panel takes the whole frame */
     #panel { width:100vw; }
     body.panel-open #bar, body.panel-open #viewport { right:0; }
-    body.panel-open #abar { left:50%; }
   }
   .pcard { background:var(--card); border:1px solid var(--line); border-radius:10px;
     padding:9px 12px 11px; margin-bottom:12px; }
@@ -228,6 +229,15 @@
   #abar span { color:var(--dim); font-size:12px; margin-right:4px; }
   #abar button.warn { border-color:#7a4a4a; }
   #abar button.go { background:#2b4a71; border-color:#3f6ca3; }
+  /* while the side panel is open the action bar is REPARENTED into it (see
+     updateBars) and pinned to its very top — sticky, so it stays put while
+     the panel text scrolls under it (operator directive 2026-07-31, #676). Negative margins
+     cancel the panel's padding so the strip runs edge to edge. */
+  #panel #abar { position:sticky; top:0; left:auto; right:auto; bottom:auto;
+    transform:none; z-index:5; margin:-10px -14px 12px; max-width:none;
+    border:none; border-bottom:1px solid var(--line); border-radius:0;
+    background:#151b22f2; backdrop-filter:blur(6px); box-shadow:0 6px 20px #0007;
+    padding:8px 14px; justify-content:flex-start; }
 
   #edbox { position:fixed; z-index:30; left:50%; top:10%; transform:translateX(-50%);
     width:min(560px,94vw); background:#1b222a; border:1px solid var(--line); border-radius:12px;
@@ -303,6 +313,7 @@
 <div id="abar">
   <span id="a-info"></span>
   <button id="a-child">+ child</button>
+  <button id="a-stack" title="pile the selected cards under the top-most one (it stays put)">🗂 stack</button>
   <button id="a-edit">✏️ edit</button>
   <button id="a-done">✓ done</button>
   <button id="a-arch">📥 archive</button>
@@ -379,8 +390,18 @@ function inlineMd(t) {
   h = h.replace(/(^|[\s(])\*([^*\n]+)\*(?=[\s).,;:!?]|$)/g, '$1<i>$2</i>');
   return h;
 }
-/* cheap preview renderer (collapsed cards — kept minimal for speed) */
-const md = (s) => inlineMd(s).replace(/\n/g, '<br>');
+/* cheap preview renderer (collapsed cards — kept minimal for speed).
+   Memoized (#681): render() runs this over EVERY card body on each rebuild;
+   bodies rarely change, so cache by source string. */
+const mdMemo = new Map();
+const md = (s) => {
+  let h = mdMemo.get(s);
+  if (h === undefined) {
+    if (mdMemo.size > 4000) mdMemo.clear();      // bound: ~cards × a few edits
+    h = inlineMd(s).replace(/\n/g, '<br>'); mdMemo.set(s, h);
+  }
+  return h;
+};
 /* full block markdown for the OPEN view (operator directive 2026-07-29, #374):
    fenced code, headings, lists, blockquotes, hr, paragraphs */
 function mdFull(s) {
@@ -623,6 +644,9 @@ function render() {
   const cards = [...CARDS.values()].filter(visible);
   const pos = new Map();
   for (const c of cards) pos.set(c.id, dispPos(c));
+  /* painter's order = top of screen first, so where cards overlap (🗂 stacks,
+     #702) the lower card paints on top and its header line stays visible */
+  cards.sort((a, b) => pos.get(a.id).y - pos.get(b.id).y || a.id - b.id);
 
   let svg = `<svg width="10" height="10">
     <defs><marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
@@ -681,6 +705,31 @@ function render() {
       `</div></div>`;
   }
   world.innerHTML = html;
+  renderPanel();
+  updateBars();
+}
+
+/* fast path for taps (operator directive 2026-07-31, #681): opening/closing the side panel
+   only changes sel/expanded — no card data or geometry moved. A full render()
+   (world.innerHTML over every card, markdown-ing every body) takes long enough
+   to feel laggy, so sync node classes in place and rebuild only the panel. */
+function uiSync() {
+  if (ptrs.size || editorOpen) { pendingRender = true; return; }
+  for (const id of [...expanded]) if (!sel.has(id)) expanded.delete(id);  // deselected → unexpand
+  saveExp();
+  for (const el of world.querySelectorAll('.node')) {
+    const id = +el.dataset.id;
+    el.classList.toggle('sel', sel.has(id));
+    const open = expanded.has(id);
+    el.classList.toggle('open', open);
+    if (seen && seen.has(id) && el.classList.contains('fresh')) {  // touched → glow off now
+      el.classList.remove('fresh');
+      const nb = el.querySelector('.nb'); if (nb) nb.remove();
+    }
+    const bx = el.querySelector('.b-x');
+    if (bx) { bx.textContent = open ? '🗕' : '⤢';
+      bx.title = open ? 'close the side panel' : 'open in the side panel'; }
+  }
   renderPanel();
   updateBars();
 }
@@ -745,17 +794,27 @@ $('panel').addEventListener('click', (e) => {
     case 'url': openTab(b.dataset.url); break;
     case 'find': if (c) { pushBack(); centerOn(c); } break;
     case 'edit': if (c) openEditor(c); break;
-    case 'close': expanded.delete(id); saveExp(); render(); break;
+    case 'close': expanded.delete(id); saveExp(); uiSync(); break;
   }
 });
 
+/* stable handle on the action bar: renderPanel's innerHTML rebuild detaches it
+   while it lives in the panel, and getElementById can't find a detached node */
+const ABAR = $('abar');
 function updateBars() {
   const n = ERGS.filter((e) => e.status === 'running' && e.alive).length;
   const er = $('ergrun');
   er.style.display = n ? '' : 'none';
   er.textContent = '⚙ ' + n;                        // "⚙ 2" = 2 ergs running (title says so)
   er.title = n + ' erg' + (n > 1 ? 's' : '') + ' running';
-  const ab = $('abar');
+  const ab = ABAR;
+  /* the bar's home follows the panel (operator directive 2026-07-31, #676): panel open →
+     sticky strip at the panel's very top; panel closed → floating bottom bar
+     (selection can exist with no open card: lasso, ⇧tap). Reparent BEFORE the
+     $('a-…') lookups below — they return null while the bar is detached. */
+  if (document.body.classList.contains('panel-open')) {
+    if (ab.parentElement !== $('panel')) $('panel').prepend(ab);
+  } else if (ab.parentElement !== document.body) document.body.appendChild(ab);
   if (!sel.size) { ab.style.display = 'none'; return; }
   ab.style.display = 'flex';
   const cs = [...sel].map((id) => CARDS.get(id)).filter(Boolean);
@@ -764,6 +823,7 @@ function updateBars() {
   $('a-arch').style.display = cs.some((c) => c.status !== 'archived') ? '' : 'none';
   $('a-unarch').style.display = cs.some((c) => c.status === 'archived') ? '' : 'none';
   $('a-edit').style.display = cs.length === 1 ? '' : 'none';
+  $('a-stack').style.display = cs.length > 1 ? '' : 'none';   // stack needs ≥2 cards (#702)
   $('a-erg').style.display = cs.every((c) => c.status !== 'archived') ? '' : 'none';
   // ⛔ stop: shown when a selected card belongs to a live running erg
   // (it's the erg's output card, or the erg holds its lock)
@@ -935,12 +995,12 @@ function tap(t, e) {
   if (link) { openTab(link.href); return; }            // click is capture-retargeted; open here
   const node = t.closest('.node');
   if (!node) {                                         // empty tap: clear selection
-    if (sel.size) { sel.clear(); render(); }
+    if (sel.size) { sel.clear(); uiSync(); }
     return;
   }
   const id = +node.dataset.id;
   const wasFresh = markSeen([id]);                     // any tap on a card = touched (#372)
-  if (t.classList.contains('b-url')) { openTab(t.dataset.url); if (wasFresh) render(); return; }
+  if (t.classList.contains('b-url')) { openTab(t.dataset.url); if (wasFresh) uiSync(); return; }
   if (t.classList.contains('b-unlink')) {              // break a parent/ref link (#408)
     const par = +t.dataset.p, chd = +t.dataset.c;
     if (!confirm('break link #' + par + ' → #' + chd + '?')) return;
@@ -961,15 +1021,14 @@ function tap(t, e) {
     return;
   }
   if (t.classList.contains('b-x')) {
-    let opened = false;
     if (expanded.has(id)) expanded.delete(id);
     else {                                             // opening selects the card
       expanded.add(id);                                // (render closes any card
       if (!(e.shiftKey || e.ctrlKey || e.metaKey)) sel.clear();  // not in sel)
-      sel.add(id); opened = true;
+      sel.add(id);
     }
-    saveExp(); render();
-    if (opened) revealCard(id);                        // don't leave it under the panel (#51)
+    uiSync();                                          // fast path: classes + panel only (#681)
+    // no revealCard here: tapping a card must NOT adjust the pan (operator directive 2026-07-31, #685)
     return;
   }
   const now = Date.now();
@@ -979,13 +1038,12 @@ function tap(t, e) {
   }
   lastTap = { id, t: now };
   const meta = e.shiftKey || e.ctrlKey || e.metaKey;
-  let opened = false;
   if (meta) { sel.has(id) ? sel.delete(id) : sel.add(id); }
   else { sel.clear(); sel.add(id);                   // tap OPENS (operator directive 2026-07-29, #374)
     const cc = CARDS.get(id);                        // …except headers: nothing to open (#425)
-    if (!cc || cc.kind !== 'header') { expanded.add(id); saveExp(); opened = true; } }
-  render();
-  if (opened) revealCard(id);                        // keep it clear of the panel (#51)
+    if (!cc || cc.kind !== 'header') { expanded.add(id); saveExp(); } }
+  uiSync();                                          // fast path: classes + panel only (#681)
+  // no revealCard here: tapping a card must NOT adjust the pan (operator directive 2026-07-31, #685)
 }
 
 /* ---- editor (create + edit) ---- */
@@ -1066,15 +1124,47 @@ $('ed-save').onclick = async () => {
 
 /* ---- action bar ---- */
 const selCards = () => [...sel].map((id) => CARDS.get(id)).filter(Boolean);
-$('a-clear').onclick = () => { sel.clear(); render(); };
+$('a-clear').onclick = () => { sel.clear(); uiSync(); };
 $('a-child').onclick = () => openEditor(null, [...sel]);
 $('a-edit').onclick = () => { const c = selCards()[0]; if (c) openEditor(c); };
+/* stack the selected cards (operator directive 2026-07-31, #702): the top-most one (smallest
+   display y; ties → left-most) STAYS PUT, the rest pile beneath it in their
+   current vertical order, each a touch right+down (7,30) so every card's
+   header line stays visible and tappable. Positions persist as absolute x/y.
+   A positionless base gets anchored first (#544 lesson: if a card being moved
+   is its parent, the base's rendered spot would drift mid-stack). */
+$('a-stack').onclick = async () => {
+  const ps = selCards().map((c) => ({ c, p: dispPos(c) }))
+    .sort((a, b) => a.p.y - b.p.y || a.p.x - b.p.x);
+  if (ps.length < 2) return;
+  const base = ps[0];
+  if (base.c.x == null || base.c.y == null) {
+    const r = await act({ action: 'edit', id: base.c.id, x: base.p.x, y: base.p.y });
+    if (!r) return;
+    base.c.x = base.p.x; base.c.y = base.p.y;
+  }
+  let n = 0;
+  for (let i = 1; i < ps.length; i++) {
+    const { c } = ps[i];
+    const x = base.p.x + i * 7, y = base.p.y + i * 30;
+    const r = await act({ action: 'edit', id: c.id, x, y });
+    if (r) { c.x = x; c.y = y; n++; }
+  }
+  if (n) toast('🗂 stacked ' + (n + 1) + ' cards');
+  render(); poll();
+};
 async function setStatus(pick, st, label) {
   let n = 0;   // archive touches ONLY the picked cards (operator directive 2026-07-29, #299 — no ancestor pull)
+  let closed = false;
   for (const c of selCards()) if (pick(c)) {
     const r = await act({ action: 'status', id: c.id, status: st });
-    if (r) n++;
+    if (r) { n++;
+      /* archiving a card that's open in the side panel closes that view
+         (operator directive 2026-07-31, #704) */
+      if (st === 'archived' && expanded.has(c.id)) { expanded.delete(c.id); closed = true; }
+    }
   }
+  if (closed) { saveExp(); uiSync(); }
   if (n) toast(n + ' → ' + label);
   poll();
 }

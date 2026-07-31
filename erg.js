@@ -208,30 +208,44 @@ function modelAllowed(tok, model) {
 }
 
 // ---- stop control (board ⛔ → server `erg-stop` → SIGTERM here) ----
-// SIGTERM = clean stop: kill the claude child (TERM, KILL after 10s), skip
-// retries, and let finalize() run normally — locks released, cost line and
-// "⛔ stopped" recorded on the output card. SIGKILL remains the dirty path
-// (reaper cleans up).
+// SIGTERM = clean stop: kill the claude child's WHOLE process group (TERM,
+// KILL after 10s), skip retries, and let finalize() run normally — locks
+// released, cost line and "⛔ stopped" recorded on the output card. Group
+// kill + severing our pipe ends matters: claude's grandchildren inherit the
+// stdout/stderr pipes, and 'close' won't fire while any holder lives (first
+// version hung the full child runtime here — 5m at 01:07Z, 120s in the
+// sandbox retest). SIGKILL from outside remains the dirty path (reaper).
 let CHILD = null, STOPPED = false;
+function killChildTree(sig) {
+  if (!CHILD) return;
+  try { process.kill(-CHILD.pid, sig); }         // whole group (claude is a group leader)
+  catch (_) { try { CHILD.kill(sig); } catch (_) {} }
+}
 process.on('SIGTERM', () => {
   if (STOPPED) return;
   STOPPED = true;
   log('erg #' + ERG + ' SIGTERM received — stopping (board ⛔)');
-  if (CHILD) {
-    try { CHILD.kill('SIGTERM'); } catch (_) {}
-    setTimeout(() => { try { if (CHILD) CHILD.kill('SIGKILL'); } catch (_) {} }, 10_000).unref();
-  }
+  killChildTree('SIGTERM');
+  setTimeout(() => {
+    killChildTree('SIGKILL');
+    // last resort: a grandchild that setsid'd can still hold the pipes open —
+    // destroy our read ends so runClaude's 'close' fires and finalize() runs.
+    if (CHILD) { try { CHILD.stdout.destroy(); } catch (_) {} try { CHILD.stderr.destroy(); } catch (_) {} }
+  }, 10_000).unref();
 });
 
 // ---- async claude run with hard timeout ----
 function runClaude(args, env) {
   return new Promise((resolve) => {
-    const ch = spawn(CLAUDE, args, { cwd: HOME, env });
+    const ch = spawn(CLAUDE, args, { cwd: HOME, env, detached: true });   // own group → stoppable as a tree
     CHILD = ch;
     let out = '', err = '';
     ch.stdout.on('data', (d) => { out += d; });
     ch.stderr.on('data', (d) => { err += d; });
-    const killer = setTimeout(() => { try { ch.kill('SIGKILL'); } catch (_) {} }, TIMEOUT_MS);
+    const killer = setTimeout(() => {
+      killChildTree('SIGKILL');
+      setTimeout(() => { if (CHILD) { try { CHILD.stdout.destroy(); } catch (_) {} try { CHILD.stderr.destroy(); } catch (_) {} } }, 2000).unref();
+    }, TIMEOUT_MS);
     ch.on('close', (code) => { CHILD = null; clearTimeout(killer); resolve({ status: code, stdout: out, stderr: err }); });
     ch.on('error', (e) => { CHILD = null; clearTimeout(killer); resolve({ status: -1, stdout: out, stderr: String(e.message) }); });
   });

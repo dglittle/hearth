@@ -51,7 +51,7 @@ const db = new DatabaseSync(DB_PATH);
 db.exec('PRAGMA busy_timeout = 10000; PRAGMA foreign_keys = ON;');
 
 const KINDS = ['mind', 'short-term', 'long-term', 'human', '{{AGENT_NAME}}', 'erg', 'header'];
-// two-kind interface (the operator 2026-07-29, card #275); aliases for stray callers
+// two-kind interface (operator directive 2026-07-29, card #275); aliases for stray callers
 const KIND_ALIAS = { input: 'human', output: '{{AGENT_NAME}}', work: '{{AGENT_NAME}}' };
 const STATUSES = ['draft', 'done', 'archived'];  // 'ready' retired 2026-07-28 (all ergs explicit); 'draft' = live
 const normStatus = (s) => (s === 'ready' ? 'draft' : s);  // back-compat for stray callers
@@ -452,6 +452,28 @@ const handler = (req, res) => {
       '<h2>card-board server is up (M4a)</h2><p>board.html lands with M4b — ' +
       'meanwhile <code>/data?k=…</code> and <code>POST /act?k=…</code> are live.</p>');
   }
+  if (url.pathname === '/report') {
+    const name = url.searchParams.get('name') || '';
+    if (!name || name.includes('/') || name.includes('..') || !name.endsWith('.html'))
+      return j(400, { ok: false, error: 'bad name' });
+    if (!ok) {
+      // No/bad key: bootstrap from the board's stored key (same origin as /#k=…).
+      // Reveals nothing; just retries with localStorage.{{AGENT_NAME}}key if present.
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+      return res.end('<!doctype html><meta charset="utf-8"><title>report</title>' +
+        '<body style="font:16px system-ui;padding:2em;background:#111;color:#ddd">' +
+        '<p id="m">opening…</p><script>' +
+        'const k=localStorage.{{AGENT_NAME}}key||"";' +
+        'if(k){const u=new URL(location.href);u.searchParams.set("k",k);location.replace(u);}' +
+        'else document.getElementById("m").innerHTML=' +
+        '"no key stored — open the board once with <code>/#k=&lt;key&gt;</code>, then reload this page.";' +
+        '</script>');
+    }
+    const p = path.join(REPORTS, name);
+    if (!fs.existsSync(p)) return j(404, { ok: false, error: 'not found' });
+    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+    return res.end(fs.readFileSync(p));
+  }
   if (!ok) return j(403, { ok: false, error: 'bad key' });
 
   if (url.pathname === '/data') return j(200, dataState(url.searchParams.get('since') || ''));
@@ -486,16 +508,6 @@ const handler = (req, res) => {
       return;
     }
     return j(200, { ok: true, ...(cached || { at: 0, slots: [] }) });
-  }
-
-  if (url.pathname === '/report') {
-    const name = url.searchParams.get('name') || '';
-    if (!name || name.includes('/') || name.includes('..') || !name.endsWith('.html'))
-      return j(400, { ok: false, error: 'bad name' });
-    const p = path.join(REPORTS, name);
-    if (!fs.existsSync(p)) return j(404, { ok: false, error: 'not found' });
-    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-    return res.end(fs.readFileSync(p));
   }
 
   res.writeHead(404); res.end('{"ok":false}');
