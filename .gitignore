@@ -21,6 +21,7 @@ db/cards.db-shm
 tok-pref.json
 web/limits.json
 work/
+output/
 
 # --- domain data: whatever feeds this agent's board (collectors, cursors,
 #     fetched events) belongs to her employer, not to the seed ---

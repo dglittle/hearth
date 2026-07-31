@@ -70,12 +70,24 @@
   #limits .dial b { font-weight:600; color:var(--c-output); }
   #limits .dial.warn b { color:#e8b33f; }
   #limits .dial.crit b { color:#d9756b; }
-  /* dual bars per dial: top = usage, bottom (blue) = window elapsed */
-  #limits .bar { width:26px; height:3px; background:#20242c; border-radius:2px; overflow:hidden; }
-  #limits .bar i { display:block; height:100%; background:var(--c-output); border-radius:2px; }
-  #limits .dial.warn .bar.use i { background:#e8b33f; }
-  #limits .dial.crit .bar.use i { background:#d9756b; }
-  #limits .bar.time { height:2px; }
+  /* stacked dials (operator directive 2026-07-31, #658): per token a label|bar grid — no
+     numbers, longer bars; 5h gets its own time-bar, 7d+f7d share one.
+     Re-compacted (#662): time-bar rides in the same row as its use-bar
+     (.bstack), so 3 rows ≈ button height — titlebar back to pre-stack height.
+     In-section gap 1px; .sec adds a 3.5px break before the 7d/f7d section. */
+  #limits .lgrid { display:grid; grid-template-columns:auto 1fr; gap:1px 4px;
+    align-items:center; }
+  #limits .lb { font-size:7px; line-height:1; color:var(--dim); text-align:right; }
+  #limits .lb.warn { color:#e8b33f; }
+  #limits .lb.crit { color:#d9756b; }
+  #limits .bstack { display:flex; flex-direction:column; gap:1px; }
+  #limits .sec { margin-top:3.5px; }
+  /* green bar = usage, thin blue bar = window elapsed */
+  #limits .bar { width:64px; height:3px; background:#20242c; border-radius:1.5px; overflow:hidden; }
+  #limits .bar i { display:block; height:100%; background:var(--c-output); border-radius:1.5px; }
+  #limits .bar.use.warn i { background:#e8b33f; }
+  #limits .bar.use.crit i { background:#d9756b; }
+  #limits .bar.time { height:1.5px; }
   #limits .bar.time i { background:#5d84a9; }
   #limits .asof { color:#565962; }
   #limits button { padding:1px 5px; font-size:10.5px; border-radius:6px; }
@@ -280,8 +292,9 @@
   <h5 class="n">limits dials</h5>
   <p><b>t1</b>/<b>t2</b> = the two subscription tokens. Per token: <b>5h</b> rolling
   window · <b>7d</b> weekly (all models) · <b>f7d</b> fable weekly (API bucket 7d_oi).
-  Numbers are <b>% used</b>; the top bar repeats it, the blue bar under it is how much
-  of that window has already elapsed. ⚠ ≥75%, ‼ ≥90%. The number at the end is <b>how
+  Each row's bar = <b>% used</b> (green → amber ≥75% → red ≥90%); the thin blue bars
+  show how much of the window has elapsed — one under 5h, one shared by 7d+f7d (same
+  7-day window). Hover any bar for exact numbers. The number at the end is <b>how
   long ago</b> the last probe ran (<b>3m</b>, <b>2h</b>, <b>1d</b>) — it re-probes when an
   erg finishes with this page open, on a stale page load, or when you hit ↻ (server allows
   one probe per 90s).</p>
@@ -1063,6 +1076,10 @@ $('a-erg').onclick = async () => {
   const r = await act({ action: 'erg', card_ids: ids });
   if (r) toast('⚡ erg spawned (pid ' + r.pid + ')');
   sel.clear(); poll();
+  // erg.js is spawned detached and needs ~0.3s to create its ⚙ output card,
+  // so the immediate poll() above misses it and the box used to wait for the
+  // 5s timer (#653). Re-poll on a short fuse so it appears near-instantly.
+  if (r) for (const ms of [400, 1000, 2200]) setTimeout(poll, ms);
 };
 $('a-stop').onclick = async () => {
   const ids = [...sel];
@@ -1085,22 +1102,37 @@ function renderLimits(d) {
   limitsData = d;
   const rows = (d.slots || []).map((s) => {
     if (s.error) return '<span class="tok"><span class="tn">t' + s.slot + '</span> <span class="dial crit" title="' + esc(String(s.error)) + '"><b>probe failed</b></span></span>';
-    const dials = LIMIT_BUCKETS.map(([k, lab]) => {
-      const b = s.buckets && s.buckets[k];
-      if (!b) return '';
+    // stacked layout (operator directive 2026-07-31, #658), re-compacted (#662): one grid row
+    // per bucket; the 5h time-bar rides under the 5h use-bar in the SAME row
+    // (.bstack), the shared 7d time-bar under the last weekly row. `.sec` on
+    // the first weekly row opens a section gap (5h block vs 7d/f7d block).
+    const timeBar = (k, resets) => {
+      const reset = resets.find(Boolean);
+      const ePct = reset ? Math.round(Math.max(0, Math.min(1, 1 - (reset - Date.now()) / LIMIT_WIN[k])) * 100) : null;
+      const win = k === '5h' ? '5-hour' : '7-day';
+      return '<span class="bar time" title="' + (ePct === null ? '?' : ePct) + '% of the ' + win +
+        ' window elapsed · resets ' + esc(fmtReset(reset)) + '"><i style="width:' + (ePct === null ? 0 : ePct) + '%"></i></span>';
+    };
+    const bk = s.buckets || {};
+    const present = LIMIT_BUCKETS.filter(([k]) => bk[k]);
+    const lastK = present.length ? present[present.length - 1][0] : null;
+    const cells = [];
+    for (const [k, lab] of present) {
+      const b = bk[k];
       const pct = Math.round(b.util * 100);
       const cls = pct >= 90 ? ' crit' : pct >= 75 ? ' warn' : '';
-      const mark = pct >= 90 ? '‼' : pct >= 75 ? '⚠' : '';
-      // bottom bar: % of the window already elapsed, derived from reset - now
-      const ePct = b.reset ? Math.round(Math.max(0, Math.min(1, 1 - (b.reset - Date.now()) / LIMIT_WIN[k])) * 100) : null;
-      const win = k === '5h' ? '5-hour' : '7-day';
-      return '<span class="dial' + cls + '" title="' + lab + (k === '7d_oi' ? ' (API bucket 7d_oi — fable weekly)' : '') +
-        ' · top bar: ' + pct + '% used · bottom bar: ' + (ePct === null ? '?' : ePct) + '% of the ' + win + ' window elapsed · resets ' + esc(fmtReset(b.reset)) + '">' +
-        '<span>' + lab + ' <b>' + pct + mark + '</b></span>' +
-        '<span class="bar use"><i style="width:' + pct + '%"></i></span>' +
-        '<span class="bar time"><i style="width:' + (ePct === null ? 0 : ePct) + '%"></i></span></span>';
-    }).join(' ');
-    return '<span class="tok"><span class="tn">t' + s.slot + '</span> ' + dials + '</span>';
+      const sec = k !== '5h' && present[0][0] !== k && (k === '7d' || !bk['7d']) ? ' sec' : '';
+      const title = lab + (k === '7d_oi' ? ' (API bucket 7d_oi — fable weekly)' : '') +
+        ' · ' + pct + '% used · resets ' + esc(fmtReset(b.reset));
+      const use = '<span class="bar use' + cls + (k === lastK || k === '5h' ? '' : sec) +
+        '" title="' + title + '"><i style="width:' + pct + '%"></i></span>';
+      let stack = use;
+      if (k === '5h') stack = '<span class="bstack">' + use + timeBar('5h', [b.reset]) + '</span>';
+      else if (k === lastK) stack = '<span class="bstack' + sec + '">' + use +
+        timeBar('7d', [(bk['7d'] || {}).reset, (bk['7d_oi'] || {}).reset]) + '</span>';
+      cells.push('<span class="lb' + cls + sec + '" title="' + title + '">' + lab + '</span>' + stack);
+    }
+    return '<span class="tok"><span class="tn">t' + s.slot + '</span><span class="lgrid">' + cells.join('') + '</span></span>';
   }).join('') || '<span class="dial">(no data — hit ↻)</span>';
   $('limits').innerHTML = rows +
     '<span class="asof" id="limage"></span>' +
