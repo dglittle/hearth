@@ -549,6 +549,12 @@ function dispPos(c, depth) {
        painted it inside the archive zone looking un-dimmed (operator directive 2026-07-30,
        #513); all parents archived → kind-quadrant fallback above instead */
     if (c.status !== 'archived') parents = parents.filter((pa) => pa.status !== 'archived');
+    /* a memory-kind card (mind/short-term/long-term) never follows a parent INTO the
+       interface quadrant — only human/{{AGENT_NAME}} cards live there (operator report
+       2026-07-31, #81: a long-term card leaked into the lower-right by hanging under its
+       {{AGENT_NAME}} parent). All parents in the interface → kind-quadrant fallback above. */
+    if (c.kind === 'mind' || c.kind === 'short-term' || c.kind === 'long-term')
+      parents = parents.filter((pa) => !inInterfaceQ(pa, dispPos(pa, (depth || 0) + 1)));
     if (parents.length) {
       let best = null, by = -Infinity;
       for (const par of parents) {
@@ -685,6 +691,7 @@ function render() {
    opened card does not move or grow in-world. Rebuilds only when the content
    actually changed, so the panel's scroll position survives the 5s poll. */
 let lastPanelHtml = null;
+let lastPanelIds = '';                 // which cards are open — changes = fresh view, scroll to top (#87)
 function renderPanel() {
   const ids = [...expanded].filter((id) => CARDS.has(id));
   const open = ids.length > 0;
@@ -715,6 +722,10 @@ function renderPanel() {
     </div>`;
   }
   if (html !== lastPanelHtml) { $('panel').innerHTML = html; lastPanelHtml = html; }
+  /* opening a (different) card = a fresh view: start at the top. The 5s poll
+     leaves `ids` unchanged, so mid-read scroll position still survives. (#87) */
+  const idsKey = ids.join(',');
+  if (idsKey !== lastPanelIds) { $('panel').scrollTop = 0; lastPanelIds = idsKey; }
 }
 
 /* panel clicks are ordinary DOM clicks (no pointer capture out here) */
