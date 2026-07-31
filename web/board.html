@@ -103,34 +103,76 @@
     word-break:break-word; }
   .node .txt a, .node .txt code { color:#8fb8e8; }
   .node .txt code { background:#0d1014; padding:0 3px; border-radius:3px; color:#c9a86a; }
-  .node.expanded { z-index:9; overflow:visible; height:auto !important; min-height:60px;
-    width:360px !important; box-shadow:0 10px 34px #000b; }
-  .node.expanded .ttl, .node.expanded .txt { -webkit-line-clamp:unset; }
-  /* open cards: selectable text (cards are HTML, not canvas — operator directive 2026-07-29, #374) */
-  .node.expanded .ttl, .node.expanded .txt, .node.expanded .meta {
-    user-select:text; -webkit-user-select:text; cursor:text; }
-  /* full-markdown blocks (rendered only in the open view — #374) */
-  .node .txt p { margin:.35em 0; }
-  .node .txt p:first-child { margin-top:0; }
-  .node .txt h1, .node .txt h2, .node .txt h3, .node .txt h4 {
+  /* a card that's OPEN in the side panel stays exactly where it is on the board
+     (operator directive 2026-07-31, #51) — it only gets a marker, it never grows in-world */
+  .node.open { box-shadow:0 0 0 1.5px var(--sel), 0 8px 26px #000a; }
+  /* full-markdown blocks (open view — #374; now rendered in the side panel).
+     Deliberately UNscoped: these .txt rules serve card previews AND #panel. */
+  .txt p { margin:.35em 0; }
+  .txt p:first-child { margin-top:0; }
+  .txt h1, .txt h2, .txt h3, .txt h4 {
     margin:.6em 0 .25em; line-height:1.25; color:var(--ink); }
-  .node .txt h1 { font-size:14.5px; } .node .txt h2 { font-size:13.5px; }
-  .node .txt h3 { font-size:12.5px; } .node .txt h4 { font-size:12px; }
-  .node .txt ul, .node .txt ol { margin:.35em 0; padding-left:1.4em; }
-  .node .txt li { margin:.15em 0; }
-  .node .txt pre { background:#0d1014; border:1px solid var(--line); border-radius:6px;
+  .txt h1 { font-size:14.5px; } .txt h2 { font-size:13.5px; }
+  .txt h3 { font-size:12.5px; } .txt h4 { font-size:12px; }
+  .txt ul, .txt ol { margin:.35em 0; padding-left:1.4em; }
+  .txt li { margin:.15em 0; }
+  .txt pre { background:#0d1014; border:1px solid var(--line); border-radius:6px;
     padding:7px 9px; overflow-x:auto; margin:.45em 0; }
-  .node .txt pre code { background:none; padding:0; display:block; white-space:pre; }
-  .node .txt blockquote { margin:.45em 0; padding:2px 10px;
+  .txt pre code { background:none; padding:0; display:block; white-space:pre; }
+  .txt blockquote { margin:.45em 0; padding:2px 10px;
     border-left:3px solid var(--line); color:var(--dim); }
-  .node .txt hr { border:0; border-top:1px solid var(--line); margin:.6em 0; }
+  .txt hr { border:0; border-top:1px solid var(--line); margin:.6em 0; }
   /* parent-link chips in the OPEN view — ✕ breaks the link (operator directive 2026-07-29, #408) */
-  .node .plinks { margin-top:5px; display:flex; flex-wrap:wrap; gap:4px; font-size:10.5px; }
-  .node .plinks .pl { background:#0d1014; border:1px solid var(--line); border-radius:6px;
+  .plinks { margin-top:5px; display:flex; flex-wrap:wrap; gap:4px; font-size:10.5px; }
+  .plinks .pl { background:#0d1014; border:1px solid var(--line); border-radius:6px;
     padding:1px 2px 1px 7px; color:var(--dim); display:inline-flex; align-items:center; gap:2px; }
-  .node .plinks .pl button.b-unlink { background:none; border:none; color:#d9756b;
+  .plinks .pl button.b-unlink { background:none; border:none; color:#d9756b;
     font-size:11px; padding:0 5px; cursor:pointer; }
-  .node .plinks .pl button.b-unlink:hover { color:#ff9d93; }
+  .plinks .pl button.b-unlink:hover { color:#ff9d93; }
+
+  /* ---- side panel: the OPEN card view (operator directive 2026-07-31, #51) ----
+     Fixed to the frame, right half, full height. Scrolling inside it scrolls the
+     card text — never the board (the board's wheel/pointer handlers live on
+     #viewport, which the panel is a sibling of, and overscroll is contained).
+     While it's open the bar/board/action-bar shrink to the left half, so nothing
+     hides behind it. */
+  #panel { position:fixed; top:0; right:0; bottom:0; width:50vw; z-index:26;
+    display:none; background:var(--card2); border-left:1px solid var(--line);
+    box-shadow:-10px 0 34px #000a; overflow-y:auto; overscroll-behavior:contain;
+    touch-action:pan-y; padding:10px 14px 60px;
+    user-select:text; -webkit-user-select:text; }
+  body.panel-open #panel { display:block; }
+  body.panel-open #bar { right:50vw; }
+  body.panel-open #viewport { right:50vw; }
+  body.panel-open #abar { left:25vw; }
+  @media (max-width:680px) {              /* phone: panel takes the whole frame */
+    #panel { width:100vw; }
+    body.panel-open #bar, body.panel-open #viewport { right:0; }
+    body.panel-open #abar { left:50%; }
+  }
+  .pcard { background:var(--card); border:1px solid var(--line); border-radius:10px;
+    padding:9px 12px 11px; margin-bottom:12px; }
+  .pcard.k-mind { border-left:4px solid var(--c-mind); }
+  .pcard.k-short-term { border-left:4px solid var(--c-short-term); }
+  .pcard.k-long-term { border-left:4px solid var(--c-long-term); }
+  .pcard.k-human { border-left:4px solid var(--c-human); }
+  .pcard.k-{{AGENT_NAME}} { border-left:4px solid var(--c-{{AGENT_NAME}}); }
+  .pcard.k-erg { border-left:4px solid var(--c-erg); }
+  .pcard.arch { opacity:.55; }
+  .pcard .phead { display:flex; gap:7px; align-items:baseline; font-size:11px;
+    color:var(--dim); flex-wrap:wrap; }
+  .pcard .phead .pid { font-weight:700; color:var(--ink); font-size:12px; }
+  .pcard .phead .st { font-weight:600; }
+  .pcard .phead .pbtns { margin-left:auto; display:flex; gap:2px; }
+  .pcard .phead .pbtns button { background:none; border:none; color:var(--dim);
+    font-size:13px; padding:1px 5px; }
+  .pcard .phead .pbtns button:hover { color:var(--ink); }
+  .pcard .pttl { margin:6px 0 4px; font-size:15px; font-weight:700; line-height:1.3;
+    color:var(--ink); }
+  .pcard .txt { font-size:12.8px; line-height:1.5; color:#c3cdd8; word-break:break-word; }
+  .pcard .txt a, .pcard .txt code { color:#8fb8e8; }
+  .pcard .txt code { background:#0d1014; padding:0 3px; border-radius:3px; color:#c9a86a; }
+  .pcard .meta { margin-top:8px; font-size:10.5px; color:#5c6875; }
   .node .btns { position:absolute; right:4px; top:2px; display:flex; gap:1px; }
   .node .btns button { background:none; border:none; color:var(--dim); font-size:12px; padding:1px 3px; }
   .node .btns button:hover { color:var(--ink); }
@@ -199,6 +241,8 @@
 <body>
 <div id="viewport"><div id="world"></div></div>
 <div id="band"></div>
+<!-- side panel: open cards render here, affixed to the frame (operator directive 2026-07-31, #51) -->
+<div id="panel"></div>
 
 <div id="bar">
   <b id="brand" title="{{AGENT_NAME}} — {{PURPOSE}} — tap for more">🪶<span class="nm"> {{AGENT_NAME}}</span></b>
@@ -226,8 +270,8 @@
   paragraph with who your agent is.)</p>
   <h5 class="n">gestures</h5>
   <div class="g">
-    <span>tap</span><span>open a card</span>
-    <span>tap away</span><span>close</span>
+    <span>tap</span><span>open a card in the side panel</span>
+    <span>tap away</span><span>close the panel</span>
     <span>⇧tap</span><span>add to selection</span>
     <span>⇧drag</span><span>lasso</span>
     <span>drag card</span><span>move it</span>
@@ -390,6 +434,39 @@ let viewSaveT = null;
 const saveView = () => { clearTimeout(viewSaveT); viewSaveT = setTimeout(() => {
   try { localStorage.{{AGENT_NAME}}View = JSON.stringify(V); } catch (_) {} }, 150); };
 const apply = () => { world.style.transform = `translate(${V.tx}px,${V.ty}px) scale(${V.s})`; saveView(); };
+/* usable board width: the side panel eats the right half while it's open
+   (operator directive 2026-07-31, #51). On a phone the panel covers everything — then the
+   board keeps its full width so fit/centre math stays sane. */
+function boardW() {
+  if (!document.body.classList.contains('panel-open')) return innerWidth;
+  const w = innerWidth - $('panel').getBoundingClientRect().width;
+  return w > 140 ? w : innerWidth;
+}
+const barH = () => ($('bar').getBoundingClientRect().height || 40) + 10;
+/* centre the board on one card (used by find and the panel's ◎ button) */
+function centerOn(c) {
+  const p = dispPos(c);
+  V.s = Math.min(Math.max(V.s, .8), 1.1);
+  V.tx = boardW() / 2 - (p.x + cw(c) / 2) * V.s;
+  V.ty = (innerHeight + barH()) / 2 - (p.y + ch(c) / 2) * V.s;
+  apply();
+}
+/* opening a card must not leave it hidden behind the panel or off-screen: pan
+   the board the minimum amount that brings it back into the visible half. The
+   card itself never moves — only the viewport does (#51). */
+function revealCard(id) {
+  const c = CARDS.get(id); if (!c) return;
+  const p = dispPos(c);
+  const x1 = p.x * V.s + V.tx, y1 = p.y * V.s + V.ty;
+  const x2 = x1 + cw(c) * V.s, y2 = y1 + ch(c) * V.s;
+  const L = 10, R = boardW() - 10, T = barH(), B = innerHeight - 10;
+  let dx = 0, dy = 0;
+  if (x2 > R) dx = R - x2;
+  if (x1 + dx < L) dx = L - x1;
+  if (y2 > B) dy = B - y2;
+  if (y1 + dy < T) dy = T - y1;
+  if (dx || dy) { V.tx += dx; V.ty += dy; apply(); }
+}
 
 async function act(p) {
   try {
@@ -564,7 +641,7 @@ function render() {
     const cls = ['node', 'k-' + c.kind, 'st-' + c.status,
       c.status === 'archived' ? 'arch' : '', sel.has(c.id) ? 'sel' : '',
       hot.has(c.id) ? 'pulse' : '', fresh ? 'fresh' : '',
-      expanded.has(c.id) ? 'expanded' : ''].join(' ');
+      expanded.has(c.id) ? 'open' : ''].join(' ');   // open = showing in the side panel (#51)
     if (c.kind === 'header') {           // big-font section title, no chrome (#425)
       html += `<div class="${cls}" data-id="${c.id}" style="left:${p.x}px;top:${p.y}px">
         <div class="httl">${esc(c.title)}</div></div>`;
@@ -572,22 +649,81 @@ function render() {
     }
     const iu = (c.importance || c.urgency) ? ` · i${c.importance ?? '·'}u${c.urgency ?? '·'}` : '';
     const lk = c.lock_erg != null ? ' 🔒' : '';
-    const isChip = c.kind === 'long-term' && !expanded.has(c.id);
+    const isChip = c.kind === 'long-term';       // long-term stays a chip; its body lives in the panel
     const tsTip = 'created ' + fmtTsFull(c.created_at) + ' by ' + c.created_by +
       (c.updated_at !== c.created_at ? ' · updated ' + fmtTsFull(c.updated_at) : '');
     html += `<div class="${cls}" data-id="${c.id}"
         style="left:${p.x}px;top:${p.y}px;width:${cw(c)}px;height:${isChip ? 34 : ch(c)}px">
       <div class="top"><span>#${c.id}</span>${fresh ? '<span class="nb">✦ new</span>' : ''}<span class="st" style="color:${stColor[c.status]}">${stGlyph[c.status]}</span><span>${esc(c.kind)}${iu}${lk}</span><span class="ts" title="${esc(tsTip)}">${esc(fmtTsShort(c.created_at))}</span></div>
       <div class="ttl">${esc(c.title)}</div>` +
-      (isChip ? '' : `<div class="txt">${expanded.has(c.id) ? mdFull(c.body) : md(c.body)}</div>`) +
-      (expanded.has(c.id) ? plinksHtml(c.id) + `<div class="meta">${esc(tsTip)}</div>` : '') +
-      `<div class="btns"><button class="b-x" title="expand">${expanded.has(c.id) ? '🗕' : '⤢'}</button>` +
+      (isChip ? '' : `<div class="txt">${md(c.body)}</div>`) +
+      `<div class="btns"><button class="b-x" title="${expanded.has(c.id) ? 'close the side panel' : 'open in the side panel'}">${expanded.has(c.id) ? '🗕' : '⤢'}</button>` +
       (c.url ? `<button class="b-url" data-url="${esc(c.url)}" title="open link">↗</button>` : '') +
       `</div></div>`;
   }
   world.innerHTML = html;
+  renderPanel();
   updateBars();
 }
+
+/* ---- side panel (operator directive 2026-07-31, #51) ----
+   Every OPEN card (the `expanded` set) renders here, in a fixed 50%-wide,
+   full-height column glued to the frame. The board keeps its own pan/zoom; the
+   opened card does not move or grow in-world. Rebuilds only when the content
+   actually changed, so the panel's scroll position survives the 5s poll. */
+let lastPanelHtml = null;
+function renderPanel() {
+  const ids = [...expanded].filter((id) => CARDS.has(id));
+  const open = ids.length > 0;
+  document.body.classList.toggle('panel-open', open);
+  const stGlyph = { draft: '●', ready: '●', done: '✓ done', archived: '📥' };
+  const stColor = { draft: '#6fb3e8', ready: '#6fb3e8', done: '#5fc88f', archived: '#8a97a5' };
+  let html = '';
+  for (const id of ids) {
+    const c = CARDS.get(id);
+    const iu = (c.importance || c.urgency) ? ` · i${c.importance ?? '·'}u${c.urgency ?? '·'}` : '';
+    const lk = c.lock_erg != null ? ' 🔒 erg:' + c.lock_erg : '';
+    const tsTip = 'created ' + fmtTsFull(c.created_at) + ' by ' + c.created_by +
+      (c.updated_at !== c.created_at ? ' · updated ' + fmtTsFull(c.updated_at) : '');
+    html += `<div class="pcard k-${c.kind} ${c.status === 'archived' ? 'arch' : ''}" data-id="${c.id}">
+      <div class="phead"><span class="pid">#${c.id}</span>
+        <span class="st" style="color:${stColor[c.status]}">${stGlyph[c.status]}</span>
+        <span>${esc(c.kind)}${iu}${lk}</span>
+        <span class="pbtns">
+          ${c.url ? `<button data-act="url" data-url="${esc(c.url)}" title="open link">↗</button>` : ''}
+          <button data-act="find" title="center the board on this card">◎</button>
+          <button data-act="edit" title="edit this card">✏️</button>
+          <button data-act="close" title="close (leaves it selected)">✕</button>
+        </span></div>
+      <div class="pttl">${esc(c.title)}</div>
+      <div class="txt">${mdFull(c.body)}</div>
+      ${plinksHtml(c.id)}
+      <div class="meta">${esc(tsTip)}</div>
+    </div>`;
+  }
+  if (html !== lastPanelHtml) { $('panel').innerHTML = html; lastPanelHtml = html; }
+}
+
+/* panel clicks are ordinary DOM clicks (no pointer capture out here) */
+$('panel').addEventListener('click', (e) => {
+  const b = e.target.closest('button');
+  if (!b) return;
+  if (b.classList.contains('b-unlink')) {                 // break a parent/ref link (#408)
+    const par = +b.dataset.p, chd = +b.dataset.c;
+    if (!confirm('break link #' + par + ' → #' + chd + '?')) return;
+    act({ action: 'unlink', parent: par, child: chd })
+      .then((r) => { if (r) { toast('✂ link #' + par + ' → #' + chd + ' broken'); poll(); } });
+    return;
+  }
+  const id = +(b.closest('.pcard') || {}).dataset?.id;
+  const c = CARDS.get(id);
+  switch (b.dataset.act) {
+    case 'url': openTab(b.dataset.url); break;
+    case 'find': if (c) { pushBack(); centerOn(c); } break;
+    case 'edit': if (c) openEditor(c); break;
+    case 'close': expanded.delete(id); saveExp(); render(); break;
+  }
+});
 
 function updateBars() {
   const n = ERGS.filter((e) => e.status === 'running' && e.alive).length;
@@ -624,12 +760,8 @@ let dragPaths = null;                  // svg paths touching dragged cards (#313
 let lastTap = { id: null, t: 0 };
 
 vp.addEventListener('pointerdown', (e) => {
-  /* text inside an OPEN card is natively selectable (operator directive 2026-07-29, #374):
-     don't capture the pointer there — the browser handles selection. Links are
-     excluded so tap() stays their sole opener; drag/move an open card by its
-     header row or edges. */
-  if (ptrs.size === 0 && e.target.closest && !e.target.closest('a') &&
-      e.target.closest('.node.expanded') && e.target.closest('.ttl,.txt,.meta')) return;
+  /* (text selection lives in the side panel now — #51; cards in the world are
+     always drag/tap targets, so nothing to opt out of here) */
   ptrs.set(e.pointerId, { x: e.clientX, y: e.clientY });
   moved = 0;
   if (ptrs.size === 1) {
@@ -805,13 +937,16 @@ function tap(t, e) {
     return;
   }
   if (t.classList.contains('b-x')) {
+    let opened = false;
     if (expanded.has(id)) expanded.delete(id);
-    else {                                             // expanding selects the card
-      expanded.add(id);                                // (render collapses any card
+    else {                                             // opening selects the card
+      expanded.add(id);                                // (render closes any card
       if (!(e.shiftKey || e.ctrlKey || e.metaKey)) sel.clear();  // not in sel)
-      sel.add(id);
+      sel.add(id); opened = true;
     }
-    render(); return;
+    saveExp(); render();
+    if (opened) revealCard(id);                        // don't leave it under the panel (#51)
+    return;
   }
   const now = Date.now();
   if (lastTap.id === id && now - lastTap.t < 420) {    // double-tap → edit
@@ -820,11 +955,13 @@ function tap(t, e) {
   }
   lastTap = { id, t: now };
   const meta = e.shiftKey || e.ctrlKey || e.metaKey;
+  let opened = false;
   if (meta) { sel.has(id) ? sel.delete(id) : sel.add(id); }
   else { sel.clear(); sel.add(id);                   // tap OPENS (operator directive 2026-07-29, #374)
     const cc = CARDS.get(id);                        // …except headers: nothing to open (#425)
-    if (!cc || cc.kind !== 'header') { expanded.add(id); saveExp(); } }
+    if (!cc || cc.kind !== 'header') { expanded.add(id); saveExp(); opened = true; } }
   render();
+  if (opened) revealCard(id);                        // keep it clear of the panel (#51)
 }
 
 /* ---- editor (create + edit) ---- */
@@ -894,7 +1031,7 @@ $('ed-save').onclick = async () => {
       for (const pid of edParents) { const pc = CARDS.get(pid); if (!pc) continue;
         const pp = dispPos(pc); if (pp.y > by) { by = pp.y; bx = pp.x; bh = ch(pc); } }
       if (bx != null) { p.x = bx + 26; p.y = by + bh + 70; }
-    } else { p.x = (innerWidth / 2 - V.tx) / V.s - 120; p.y = (innerHeight / 2 - V.ty) / V.s - 48; }
+    } else { p.x = (boardW() / 2 - V.tx) / V.s - 120; p.y = (innerHeight / 2 - V.ty) / V.s - 48; }
     r = await act(p);
     if (r) { toast('created #' + r.id); sel.clear(); sel.add(r.id); markSeen([r.id]); }
   }
@@ -1003,8 +1140,9 @@ function fitTo(cs) {
     x1 = Math.min(x1, p.x); y1 = Math.min(y1, p.y);
     x2 = Math.max(x2, p.x + cw(c)); y2 = Math.max(y2, p.y + ch(c)); }
   const W = x2 - x1 + 120, H = y2 - y1 + 120;
-  V.s = Math.max(Math.min((innerWidth - 30) / W, (innerHeight - 140) / H, 1.1), .04);
-  V.tx = 15 - x1 * V.s + (innerWidth - 30 - W * V.s) / 2;
+  const vw = boardW();                        // the panel's half doesn't count (#51)
+  V.s = Math.max(Math.min((vw - 30) / W, (innerHeight - 140) / H, 1.1), .04);
+  V.tx = 15 - x1 * V.s + (vw - 30 - W * V.s) / 2;
   V.ty = 100 - y1 * V.s + (innerHeight - 140 - H * V.s) / 2;
   apply();
 }
@@ -1037,11 +1175,7 @@ function findCard() {
   expanded.add(id); saveExp();
   markSeen([id]);
   render();
-  const p = dispPos(c);                       // center at a readable zoom
-  V.s = Math.min(Math.max(V.s, .8), 1.1);
-  V.tx = innerWidth / 2 - (p.x + cw(c) / 2) * V.s;
-  V.ty = (innerHeight + 60) / 2 - (p.y + ch(c) / 2) * V.s;   // +60: clear the top bar
-  apply();
+  centerOn(c);                                // centre in the visible half, readable zoom
   $('findn').value = ''; $('findn').blur();
 }
 $('find').onclick = findCard;
@@ -1064,6 +1198,7 @@ $('back').onclick = () => {
   render();
   V.s = st.V.s; V.tx = st.V.tx; V.ty = st.V.ty;
   apply();
+  if (sel.size) revealCard([...sel][0]);       // the panel may now cover where we landed (#51)
 };
 $('findn').addEventListener('keydown', (e) => {
   e.stopPropagation();                        // keep Escape-to-clear-selection off while typing
@@ -1102,6 +1237,7 @@ document.addEventListener('keydown', (e) => {
       && Number.isFinite(savedV.tx) && Number.isFinite(savedV.ty)) {
     Object.assign(V, savedV); apply();       // restore last pan/zoom
   } else fitAll();                           // first-ever visit
+  if (expanded.size) revealCard([...expanded][0]);   // restored open card, clear of the panel (#51)
   restoreEditor();                           // reopen dialog + text if one was up
   setInterval(poll, 5000);
   // limits on load: show cache instantly; probe only if it's gone stale (>15 min)
