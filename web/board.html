@@ -16,42 +16,69 @@
   html,body { margin:0; height:100%; overflow:hidden; background:var(--bg);
     color:var(--ink); font:13px/1.4 -apple-system,"Segoe UI",Helvetica,sans-serif; }
 
-  #bar { position:fixed; top:0; left:0; right:0; z-index:20; display:flex; gap:8px;
-    align-items:center; padding:7px 12px; background:rgba(13,16,20,.9);
+  /* titlebar: sized to stay ONE row in a half-screen window (operator directive 2026-07-31, #626).
+     Gesture legend moved behind the (?) button; limits dials compacted. */
+  #bar { position:fixed; top:0; left:0; right:0; z-index:20; display:flex; gap:6px;
+    align-items:center; padding:6px 9px; background:rgba(13,16,20,.9);
     backdrop-filter:blur(6px); border-bottom:1px solid var(--line); flex-wrap:wrap; }
-  #bar b { font-size:14px; }
-  #bar .leg { display:flex; gap:8px; align-items:center; color:var(--dim); font-size:11px; flex-wrap:wrap; }
-  #bar .leg i { width:8px; height:8px; border-radius:50%; display:inline-block; margin-right:3px; }
+  /* brand: feather + name back in the bar (operator directive 2026-07-31, #630); tap it for
+     the pronunciation guide in the (?) popover */
+  #bar b { font-size:15px; cursor:pointer; white-space:nowrap; }
+  #bar b .nm { font-size:12.5px; color:var(--ink); letter-spacing:.01em; font-weight:600; }
+  @media (max-width:620px) { #bar b .nm { display:none; } }
   button { background:var(--card); color:var(--ink); border:1px solid var(--line);
     border-radius:7px; padding:5px 11px; font-size:12px; cursor:pointer; }
   button:active { background:var(--line); }
   button.on { border-color:var(--sel); color:#9ec9ff; }
-  #findn { width:58px; background:#0d1014; color:var(--ink); border:1px solid var(--line);
-    border-radius:7px; padding:5px 8px; font-size:12px; }
+  #bar button { padding:4px 8px; font-size:11.5px; }
+  #bar button#help { border-radius:50%; padding:0; width:20px; height:20px; line-height:18px;
+    font-size:12px; color:var(--dim); text-align:center; flex-shrink:0; }
+  #bar button#help.on { color:#9ec9ff; }
+  #findn { width:46px; background:#0d1014; color:var(--ink); border:1px solid var(--line);
+    border-radius:7px; padding:4px 6px; font-size:11.5px; }
   #findn:focus { outline:none; border-color:var(--sel); }
   #back:disabled { opacity:.35; cursor:default; }
-  #ergrun { color:var(--c-erg); font-size:12px; display:none; }
-  #stamp { color:var(--dim); font-size:11px; margin-left:auto; }
+  #ergrun { color:var(--c-erg); font-size:11px; white-space:nowrap; display:none; }
+  #stamp { color:var(--dim); font-size:10.5px; white-space:nowrap; }
+  /* narrow window (≈ half a laptop screen): shed the last non-essential bits so
+     the titlebar stays a single row — the info stays in the tooltips (#626) */
+  @media (max-width:900px) { #stamp .cnt { display:none; } }
 
-  /* limits dials (ported from the watch-page — M5 follow-up, card #252) */
-  #limits { display:flex; flex-wrap:wrap; gap:.2em .9em; align-items:center;
-    font-size:11px; color:var(--dim); }
-  #limits .lab { color:#c9a86a; letter-spacing:.04em; }
-  #limits .tok { display:flex; gap:.55em; align-items:center; white-space:nowrap; }
-  #limits .tn { color:var(--ink); }
-  #limits .dial { display:inline-flex; flex-direction:column; gap:1px; line-height:1.2; }
+  /* (?) popover — everything that used to sit inline in the titlebar */
+  #helpbox { position:fixed; z-index:30; top:38px; left:8px; width:min(340px,92vw);
+    background:#1b222a; border:1px solid var(--line); border-radius:12px; padding:11px 13px;
+    box-shadow:0 12px 40px #000c; display:none; font-size:11.5px; color:var(--dim); }
+  #helpbox h5 { margin:0 0 5px; font-size:11px; color:#c9a86a; letter-spacing:.05em;
+    text-transform:uppercase; font-weight:600; }
+  #helpbox h5.n { margin-top:11px; }
+  #helpbox .g { display:grid; grid-template-columns:auto 1fr; gap:2px 9px; align-items:baseline; }
+  #helpbox .g span:nth-child(odd) { color:var(--ink); white-space:nowrap; }
+  #helpbox p { margin:0; line-height:1.45; }
+
+  /* limits dials (ported from the watch-page — M5 follow-up, card #252).
+     Compacted 2026-07-31 (#626): no "limits" word, no % signs, 26px bars —
+     the legend for all of it lives in the (?) popover. */
+  /* right-justified (operator directive 2026-07-31, #636): margin-left:auto pushes limits —
+     and the stamp after it — to the bar's right edge */
+  #limits { display:flex; flex-wrap:wrap; gap:.2em .45em; align-items:center;
+    font-size:10px; color:var(--dim); margin-left:auto; }
+  #limits .tok { display:flex; gap:.4em; align-items:center; white-space:nowrap; }
+  /* a bit of air between the two token sections (operator directive 2026-07-31, #636) */
+  #limits .tok + .tok { margin-left:.65em; }
+  #limits .tn { color:#c9a86a; }
+  #limits .dial { display:inline-flex; flex-direction:column; gap:1px; line-height:1.15; }
   #limits .dial b { font-weight:600; color:var(--c-output); }
   #limits .dial.warn b { color:#e8b33f; }
   #limits .dial.crit b { color:#d9756b; }
   /* dual bars per dial: top = usage, bottom (blue) = window elapsed */
-  #limits .bar { width:52px; height:3px; background:#20242c; border-radius:2px; overflow:hidden; }
+  #limits .bar { width:26px; height:3px; background:#20242c; border-radius:2px; overflow:hidden; }
   #limits .bar i { display:block; height:100%; background:var(--c-output); border-radius:2px; }
   #limits .dial.warn .bar.use i { background:#e8b33f; }
   #limits .dial.crit .bar.use i { background:#d9756b; }
   #limits .bar.time { height:2px; }
   #limits .bar.time i { background:#5d84a9; }
   #limits .asof { color:#565962; }
-  #limits button { padding:2px 7px; font-size:11px; border-radius:6px; }
+  #limits button { padding:1px 5px; font-size:10.5px; border-radius:6px; }
 
   #viewport { position:fixed; inset:0; touch-action:none; cursor:grab; overflow:hidden; }
   #viewport.panning { cursor:grabbing; }
@@ -79,7 +106,7 @@
   .node.expanded { z-index:9; overflow:visible; height:auto !important; min-height:60px;
     width:360px !important; box-shadow:0 10px 34px #000b; }
   .node.expanded .ttl, .node.expanded .txt { -webkit-line-clamp:unset; }
-  /* open cards: selectable text (cards are HTML, not canvas — the operator 2026-07-29, #374) */
+  /* open cards: selectable text (cards are HTML, not canvas — operator directive 2026-07-29, #374) */
   .node.expanded .ttl, .node.expanded .txt, .node.expanded .meta {
     user-select:text; -webkit-user-select:text; cursor:text; }
   /* full-markdown blocks (rendered only in the open view — #374) */
@@ -97,7 +124,7 @@
   .node .txt blockquote { margin:.45em 0; padding:2px 10px;
     border-left:3px solid var(--line); color:var(--dim); }
   .node .txt hr { border:0; border-top:1px solid var(--line); margin:.6em 0; }
-  /* parent-link chips in the OPEN view — ✕ breaks the link (the operator 2026-07-29, #408) */
+  /* parent-link chips in the OPEN view — ✕ breaks the link (operator directive 2026-07-29, #408) */
   .node .plinks { margin-top:5px; display:flex; flex-wrap:wrap; gap:4px; font-size:10.5px; }
   .node .plinks .pl { background:#0d1014; border:1px solid var(--line); border-radius:6px;
     padding:1px 2px 1px 7px; color:var(--dim); display:inline-flex; align-items:center; gap:2px; }
@@ -113,9 +140,9 @@
   .node.k-human { border-left:4px solid var(--c-human); }
   .node.k-{{AGENT_NAME}} { border-left:4px solid var(--c-{{AGENT_NAME}}); }
   .node.k-erg { border-left:4px solid var(--c-erg); }
-  /* header cards (the operator 2026-07-30, #425): big-font section titles for the board.
+  /* header cards (operator directive 2026-07-30, #425): big-font section titles for the board.
      Drag/select like any card, 2×tap edits; no chrome, no body, never expands.
-     Always gold — headers are exempt from the fresh/seen color shift (the operator
+     Always gold — headers are exempt from the fresh/seen color shift (operator
      2026-07-30, #464: the old slate-blue "seen" color looked like stuck
      selection, since first tap = markSeen = gold→blue at the moment of select). */
   .node.k-header { background:none; border:none; padding:2px 8px; overflow:visible; }
@@ -126,7 +153,7 @@
   .node.st-done .ttl { color:var(--dim); }
   .node.arch { opacity:.38; }
   .node.sel { outline:2.5px solid var(--sel); outline-offset:2px; opacity:1; }
-  /* fresh = never touched in THIS browser (the operator 2026-07-29, #372 + #381): static
+  /* fresh = never touched in THIS browser (operator directive 2026-07-29, #372 + #381): static
      gold-tinted BACKGROUND + gold border + ✦ new badge, until tapped/expanded/
      dragged/lassoed. No animation — pulsing is reserved for things that end on
      their own (live ergs, .pulse below). */
@@ -174,20 +201,46 @@
 <div id="band"></div>
 
 <div id="bar">
-  <b>🪶 {{AGENT_NAME}}</b>
+  <b id="brand" title="{{AGENT_NAME}} — {{PURPOSE}} — tap for more">🪶<span class="nm"> {{AGENT_NAME}}</span></b>
   <button id="fit">fit</button>
-  <button id="newcard">+ new</button>
-  <!-- find a card by number (the operator 2026-07-29, #387): paste "123" or "#123",
+  <button id="newcard" title="new card">+</button>
+  <!-- find a card by number (operator directive 2026-07-29, #387): paste "123" or "#123",
        hit find/Enter → pan+zoom to it, select + open it -->
   <input id="findn" inputmode="numeric" placeholder="#…">
   <button id="find">find</button>
-  <!-- back to the card/view you were on before the last find (the operator 2026-07-29, #393) -->
+  <!-- back to the card/view you were on before the last find (operator directive 2026-07-29, #393) -->
   <button id="back" disabled>back</button>
+  <!-- gestures + limits legend live here now (operator directive 2026-07-31, #626) so the
+       titlebar fits one row in a half-screen window -->
+  <button id="help" title="gestures &amp; legend">?</button>
   <span id="ergrun"></span>
-  <!-- kind legend removed (the operator 2026-07-29, #303) — cards state their kind -->
-  <span class="leg">tap=open · tap away=close · ⇧tap=multi · ⇧drag=lasso · drag card=move · 2×tap=edit</span>
-  <span id="limits" title="subscription usage — 5h + weekly (all models) + fable weekly (API bucket 7d_oi), per token. Refreshes when an erg finishes while this page is open; no background polling.">…</span>
+  <span id="limits" title="subscription usage — tap ? for the legend">…</span>
   <span id="stamp"></span>
+</div>
+
+<div id="helpbox">
+  <h5>🪶 {{AGENT_NAME}}</h5>
+  <p><b>{{AGENT_NAME}}</b> works on {{PURPOSE}}. An <b>erg</b> is one unit of that
+  work: a session wakes, does one chunk, writes it to a card, evaporates. The
+  feather is the quill — the erg is gone, the writing stays. (Replace this
+  paragraph with who your agent is.)</p>
+  <h5 class="n">gestures</h5>
+  <div class="g">
+    <span>tap</span><span>open a card</span>
+    <span>tap away</span><span>close</span>
+    <span>⇧tap</span><span>add to selection</span>
+    <span>⇧drag</span><span>lasso</span>
+    <span>drag card</span><span>move it</span>
+    <span>2×tap</span><span>edit</span>
+  </div>
+  <h5 class="n">limits dials</h5>
+  <p><b>t1</b>/<b>t2</b> = the two subscription tokens. Per token: <b>5h</b> rolling
+  window · <b>7d</b> weekly (all models) · <b>f7d</b> fable weekly (API bucket 7d_oi).
+  Numbers are <b>% used</b>; the top bar repeats it, the blue bar under it is how much
+  of that window has already elapsed. ⚠ ≥75%, ‼ ≥90%. The number at the end is <b>how
+  long ago</b> the last probe ran (<b>3m</b>, <b>2h</b>, <b>1d</b>) — it re-probes when an
+  erg finishes with this page open, on a stale page load, or when you hit ↻ (server allows
+  one probe per 90s).</p>
 </div>
 
 <div id="abar">
@@ -198,6 +251,7 @@
   <button id="a-arch">📥 archive</button>
   <button id="a-unarch">⬆ un-archive</button>
   <button id="a-erg" class="go">⚡ erg</button>
+  <button id="a-stop">⛔ stop</button>
   <button id="a-clear">✕</button>
 </div>
 
@@ -238,7 +292,7 @@ const toast = (m) => { const t = $('toast'); t.textContent = m; t.style.opacity 
   clearTimeout(t._h); t._h = setTimeout(() => t.style.opacity = 0, 2200); };
 
 /* ---- timestamps: db stores UTC ISO ("…Z"); render in the BROWSER's timezone
-   (the operator 2026-07-29, #292). Short form on every card, full form in tooltip +
+   (operator directive 2026-07-29, #292). Short form on every card, full form in tooltip +
    expanded meta line. */
 function fmtTsShort(iso) {
   const t = Date.parse(iso || ''); if (!Number.isFinite(t)) return '';
@@ -270,7 +324,7 @@ function inlineMd(t) {
 }
 /* cheap preview renderer (collapsed cards — kept minimal for speed) */
 const md = (s) => inlineMd(s).replace(/\n/g, '<br>');
-/* full block markdown for the OPEN view (the operator 2026-07-29, #374):
+/* full block markdown for the OPEN view (operator directive 2026-07-29, #374):
    fenced code, headings, lists, blockquotes, hr, paragraphs */
 function mdFull(s) {
   const src = String(s ?? '').split('\n');
@@ -311,13 +365,13 @@ function mdFull(s) {
 const CARDS = new Map();            // id -> card row
 let LINKS = [], ERGS = [], VER = null, since = '';
 const sel = new Set(), expanded = new Set();
-/* expanded cards persist across reloads (the operator 2026-07-29, #295): render
+/* expanded cards persist across reloads (operator directive 2026-07-29, #295): render
    write-throughs the set; boot restores it (re-selecting too, since render
    collapses any expanded card that isn't selected). */
 const saveExp = () => {
   try { localStorage.{{AGENT_NAME}}Exp = JSON.stringify([...expanded]); } catch (_) {} };
 let editorOpen = false, pendingRender = false;
-/* fresh-card tracking (the operator 2026-07-29, #372): per-browser set of card ids this
+/* fresh-card tracking (operator directive 2026-07-29, #372): per-browser set of card ids this
    board has "touched" (tap/expand/drag/lasso/link-open/create). null until the
    first poll seeds it — first-ever visit marks everything seen (no retro-glow). */
 let seen = null;
@@ -330,7 +384,7 @@ function markSeen(ids) {
   return changed;
 }
 const V = { s: .7, tx: 60, ty: 120 };
-/* pan/zoom persists across refreshes (the operator 2026-07-29, #278): every apply()
+/* pan/zoom persists across refreshes (operator directive 2026-07-29, #278): every apply()
    debounce-saves V; boot restores it (fitAll only on first-ever visit). */
 let viewSaveT = null;
 const saveView = () => { clearTimeout(viewSaveT); viewSaveT = setTimeout(() => {
@@ -364,6 +418,9 @@ async function poll() {
   for (const id of [...CARDS.keys()])
     if (!keep.has(id)) { CARDS.delete(id); sel.delete(id); removed = true; }
   for (const c of d.cards) CARDS.set(c.id, c);
+  /* safety net (card #614): a create whose commit slipped past even the
+     server's delta overlap ⇒ an id we've never seen. Refetch full once. */
+  if (!d.full && d.ids.some((id) => !CARDS.has(id))) { since = ''; return poll(); }
   const ej = JSON.stringify(d.ergs), lj = JSON.stringify(d.links);
   const changed = d.cards.length || removed || ej !== lastErgsJson || lj !== lastLinksJson;
   LINKS = d.links; ERGS = d.ergs; lastErgsJson = ej; lastLinksJson = lj;
@@ -374,7 +431,10 @@ async function poll() {
     if (!nowRun.has(id)) { fetchLimits(true, 'erg-end'); break; }
   runningErgs = nowRun;
   since = d.generated_at;
-  $('stamp').textContent = d.generated_at.slice(11, 16) + 'Z · ' + CARDS.size + ' cards';
+  // no wall clock any more (operator directive 2026-07-31, #630 — the Mac has one); just the card
+  // count, which hides itself on narrow windows (CSS) so the bar stays one row (#626)
+  $('stamp').innerHTML = '<span class="cnt">' + CARDS.size + ' cards</span>';
+  $('stamp').title = CARDS.size + ' cards · board data as of ' + d.generated_at.slice(11, 16) + 'Z';
   if (changed) render();
 }
 
@@ -384,10 +444,21 @@ let posCache = new Map();
 function dispPos(c, depth) {
   if (c.x != null && c.y != null) return { x: c.x, y: c.y };
   const hit = posCache.get(c.id); if (hit) return hit;
-  let p = { x: 2400 + (c.id % 7) * 40, y: 100 + (c.id % 9) * 60 };   // orphan fallback (interface quadrant)
+  /* orphan fallback — quadrant by KIND (operator directive 2026-07-30, #490): a positionless,
+     parentless card must land in its own quadrant, not leak into the interface.
+     human/{{AGENT_NAME}} → interface (lower-right); short-term/mind → live memory
+     (upper-right); long-term → upper-left. */
+  const fx = (c.id % 7) * 40, fy = (c.id % 9) * 60;
+  let p = { x: 2400 + fx, y: 100 + fy };                                    // human/{{AGENT_NAME}}
+  if (c.kind === 'short-term' || c.kind === 'mind') p = { x: 2400 + fx, y: -700 + fy };
+  else if (c.kind === 'long-term') p = { x: -2600 + fx, y: -700 + fy };
   if ((depth || 0) < 6) {
-    const parents = LINKS.filter((l) => l.child === c.id && l.kind === 'child')
+    let parents = LINKS.filter((l) => l.child === c.id && l.kind === 'child')
       .map((l) => CARDS.get(l.parent)).filter(Boolean);
+    /* a LIVE positionless card never hangs under an archived parent — that
+       painted it inside the archive zone looking un-dimmed (operator directive 2026-07-30,
+       #513); all parents archived → kind-quadrant fallback above instead */
+    if (c.status !== 'archived') parents = parents.filter((pa) => pa.status !== 'archived');
     if (parents.length) {
       let best = null, by = -Infinity;
       for (const par of parents) {
@@ -400,15 +471,15 @@ function dispPos(c, depth) {
   posCache.set(c.id, p);
   return p;
 }
-/* archived cards are ALWAYS visible in their quadrant (the operator 2026-07-28, #256b) */
+/* archived cards are ALWAYS visible in their quadrant (operator directive 2026-07-28, #256b) */
 const visible = () => true;
 
 /* interface quadrant = lower-right (x>0, y>0 by card center). No arrows may
    cross its boundary: edges between the interaction area and ANY other
-   quadrant are hidden (the operator 2026-07-30, #431). */
+   quadrant are hidden (operator directive 2026-07-30, #431). */
 const inInterfaceQ = (c, p) => p.x + cw(c) / 2 > 0 && p.y + ch(c) / 2 > 0;
 
-/* edge geometry — shared by render() and the live drag update (the operator 2026-07-29, #313) */
+/* edge geometry — shared by render() and the live drag update (operator directive 2026-07-29, #313) */
 function edgeD(kind, a, b, pa, pb) {
   if (kind === 'child') {
     const x1 = pa.x + cw(a) / 2, y1 = pa.y + ch(a), x2 = pb.x + cw(b) / 2, y2 = pb.y;
@@ -420,7 +491,7 @@ function edgeD(kind, a, b, pa, pb) {
   return `M${x1},${y1} C${x1 - 50},${y1} ${x2 + 50},${y2} ${x2},${y2}`;
 }
 
-/* parent-link chips for the OPEN view (the operator 2026-07-29, #408): every upward
+/* parent-link chips for the OPEN view (operator directive 2026-07-29, #408): every upward
    link of this card — '↑ #n' = parent (child-kind), '⇢ ref #n' = a card this
    one references — each with a ✕ that breaks that single link (confirm first). */
 function plinksHtml(id) {
@@ -522,7 +593,8 @@ function updateBars() {
   const n = ERGS.filter((e) => e.status === 'running' && e.alive).length;
   const er = $('ergrun');
   er.style.display = n ? '' : 'none';
-  er.textContent = '⚙ ' + n + ' erg' + (n > 1 ? 's' : '') + ' running';
+  er.textContent = '⚙ ' + n;                        // "⚙ 2" = 2 ergs running (title says so)
+  er.title = n + ' erg' + (n > 1 ? 's' : '') + ' running';
   const ab = $('abar');
   if (!sel.size) { ab.style.display = 'none'; return; }
   ab.style.display = 'flex';
@@ -533,6 +605,11 @@ function updateBars() {
   $('a-unarch').style.display = cs.some((c) => c.status === 'archived') ? '' : 'none';
   $('a-edit').style.display = cs.length === 1 ? '' : 'none';
   $('a-erg').style.display = cs.every((c) => c.status !== 'archived') ? '' : 'none';
+  // ⛔ stop: shown when a selected card belongs to a live running erg
+  // (it's the erg's output card, or the erg holds its lock)
+  const liveErg = (c) => ERGS.some((e) => e.status === 'running' && e.alive &&
+    (e.info_card === c.id || c.lock_erg === e.id));
+  $('a-stop').style.display = cs.some(liveErg) ? '' : 'none';
 }
 
 /* ---- pan / zoom / drag / lasso / tap ----
@@ -547,7 +624,7 @@ let dragPaths = null;                  // svg paths touching dragged cards (#313
 let lastTap = { id: null, t: 0 };
 
 vp.addEventListener('pointerdown', (e) => {
-  /* text inside an OPEN card is natively selectable (the operator 2026-07-29, #374):
+  /* text inside an OPEN card is natively selectable (operator directive 2026-07-29, #374):
      don't capture the pointer there — the browser handles selection. Links are
      excluded so tap() stays their sole opener; drag/move an open card by its
      header row or edges. */
@@ -613,7 +690,7 @@ vp.addEventListener('pointermove', (e) => {
       const el = world.querySelector(`.node[data-id="${cid}"]`);
       if (el) { el.style.left = (o.x + dxw) + 'px'; el.style.top = (o.y + dyw) + 'px'; }
     }
-    // arrows follow the cards live during the drag (the operator 2026-07-29, #313)
+    // arrows follow the cards live during the drag (operator directive 2026-07-29, #313)
     if (dragPaths) {
       const posOf = (cid) => {
         const o = dragOrig.get(cid);
@@ -711,7 +788,19 @@ function tap(t, e) {
   if (t.classList.contains('b-unlink')) {              // break a parent/ref link (#408)
     const par = +t.dataset.p, chd = +t.dataset.c;
     if (!confirm('break link #' + par + ' → #' + chd + '?')) return;
-    act({ action: 'unlink', parent: par, child: chd })
+    /* unlink-anchor fix (#544): a positionless child renders relative to its
+       parents — cutting a child-link could drop its only anchor and teleport
+       it to the orphan fallback (how #540 "vanished"). Persist the currently
+       rendered spot FIRST, then cut; abort the cut if the save fails. */
+    const cc = CARDS.get(chd);
+    const anchored = cc && (cc.x == null || cc.y == null) &&
+      LINKS.some((l) => l.parent === par && l.child === chd && l.kind === 'child');
+    const pre = anchored
+      ? (() => { const p = dispPos(cc);
+                 return act({ action: 'edit', id: chd, x: p.x, y: p.y })
+                   .then((r) => { if (r) { cc.x = p.x; cc.y = p.y; } return r; }); })()
+      : Promise.resolve(true);
+    pre.then((ok) => ok && act({ action: 'unlink', parent: par, child: chd }))
       .then((r) => { if (r) { toast('✂ link #' + par + ' → #' + chd + ' broken'); poll(); } });
     return;
   }
@@ -732,7 +821,7 @@ function tap(t, e) {
   lastTap = { id, t: now };
   const meta = e.shiftKey || e.ctrlKey || e.metaKey;
   if (meta) { sel.has(id) ? sel.delete(id) : sel.add(id); }
-  else { sel.clear(); sel.add(id);                   // tap OPENS (the operator 2026-07-29, #374)
+  else { sel.clear(); sel.add(id);                   // tap OPENS (operator directive 2026-07-29, #374)
     const cc = CARDS.get(id);                        // …except headers: nothing to open (#425)
     if (!cc || cc.kind !== 'header') { expanded.add(id); saveExp(); } }
   render();
@@ -745,7 +834,7 @@ function openEditor(c, parents) {
   $('ed-head').textContent = c ? `edit #${c.id} (${c.kind})`
     : parents && parents.length ? '+ child of ' + parents.map((p) => '#' + p).join(' ') : '+ new card';
   $('ed-kind').style.display = c ? 'none' : '';
-  $('ed-kind').value = c ? c.kind : 'human';   // the operator's UI → his cards default to human
+  $('ed-kind').value = c ? c.kind : 'human';   // the operator's UI → their cards default to human
   $('ed-title').value = c ? c.title : '';
   $('ed-body').value = c ? c.body : '';
   $('ed-url').value = (c && c.url) || '';
@@ -759,7 +848,7 @@ function closeEditor() { $('edbox').style.display = 'none'; editorOpen = false;
   try { localStorage.removeItem('{{AGENT_NAME}}Ed'); } catch (_) {}
   if (pendingRender) render(); }
 
-/* editor dialog persists across refreshes (the operator 2026-07-29, #278): every
+/* editor dialog persists across refreshes (operator directive 2026-07-29, #278): every
    keystroke saves open-state + fields; boot reopens it with the text intact. */
 function saveEd() {
   if (!editorOpen) return;
@@ -820,7 +909,7 @@ $('a-clear').onclick = () => { sel.clear(); render(); };
 $('a-child').onclick = () => openEditor(null, [...sel]);
 $('a-edit').onclick = () => { const c = selCards()[0]; if (c) openEditor(c); };
 async function setStatus(pick, st, label) {
-  let n = 0;   // archive touches ONLY the picked cards (the operator 2026-07-29, #299 — no ancestor pull)
+  let n = 0;   // archive touches ONLY the picked cards (operator directive 2026-07-29, #299 — no ancestor pull)
   for (const c of selCards()) if (pick(c)) {
     const r = await act({ action: 'status', id: c.id, status: st });
     if (r) n++;
@@ -838,6 +927,13 @@ $('a-erg').onclick = async () => {
   if (r) toast('⚡ erg spawned (pid ' + r.pid + ')');
   sel.clear(); poll();
 };
+$('a-stop').onclick = async () => {
+  const ids = [...sel];
+  if (!ids.length) return;
+  const r = await act({ action: 'erg-stop', card_ids: ids });
+  if (r) toast('⛔ stop sent to erg ' + r.stopped.map((i) => '#' + i).join(', '));
+  sel.clear(); poll();
+};
 
 /* ---- limits dials (ported from the watch-page — M5 follow-up, card #252) ----
    No timer probes anything. The server caches the last probe in web/limits.json;
@@ -845,13 +941,13 @@ $('a-erg').onclick = async () => {
    poll()), page load with a stale cache (>15 min), or the ↻ button. The server
    debounces to one probe per 90s regardless. fable-wk = API bucket 7d_oi. */
 let limitsAt = 0, limitsData = null, runningErgs = null;
-const LIMIT_BUCKETS = [['5h', '5h'], ['7d', '7d'], ['7d_oi', 'fable-wk']];
+const LIMIT_BUCKETS = [['5h', '5h'], ['7d', '7d'], ['7d_oi', 'f7d']];
 const LIMIT_WIN = { '5h': 5 * 3600e3, '7d': 7 * 86400e3, '7d_oi': 7 * 86400e3 }; // window lengths (ms)
 const fmtReset = (ms) => ms ? new Date(ms).toLocaleString([], { weekday: 'short', hour: '2-digit', minute: '2-digit' }) : '?';
 function renderLimits(d) {
   limitsData = d;
   const rows = (d.slots || []).map((s) => {
-    if (s.error) return '<span class="tok"><span class="tn">tok' + s.slot + '</span> <span class="dial crit"><b>probe failed: ' + esc(String(s.error)) + '</b></span></span>';
+    if (s.error) return '<span class="tok"><span class="tn">t' + s.slot + '</span> <span class="dial crit" title="' + esc(String(s.error)) + '"><b>probe failed</b></span></span>';
     const dials = LIMIT_BUCKETS.map(([k, lab]) => {
       const b = s.buckets && s.buckets[k];
       if (!b) return '';
@@ -863,17 +959,34 @@ function renderLimits(d) {
       const win = k === '5h' ? '5-hour' : '7-day';
       return '<span class="dial' + cls + '" title="' + lab + (k === '7d_oi' ? ' (API bucket 7d_oi — fable weekly)' : '') +
         ' · top bar: ' + pct + '% used · bottom bar: ' + (ePct === null ? '?' : ePct) + '% of the ' + win + ' window elapsed · resets ' + esc(fmtReset(b.reset)) + '">' +
-        '<span>' + lab + ' <b>' + pct + '%' + mark + '</b></span>' +
+        '<span>' + lab + ' <b>' + pct + mark + '</b></span>' +
         '<span class="bar use"><i style="width:' + pct + '%"></i></span>' +
         '<span class="bar time"><i style="width:' + (ePct === null ? 0 : ePct) + '%"></i></span></span>';
     }).join(' ');
-    return '<span class="tok"><span class="tn">tok' + s.slot + '</span> ' + dials + '</span>';
-  }).join('') || '<span class="dial">(no data yet — hit ↻)</span>';
-  $('limits').innerHTML = '<span class="lab" title="subscription rate-limit dials — 5h window · weekly all-models · fable weekly">limits</span>' + rows +
-    '<span class="asof">' + (d.at ? new Date(d.at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) + (d.why ? ' (' + esc(String(d.why)) + ')' : '') : 'never probed') + '</span>' +
+    return '<span class="tok"><span class="tn">t' + s.slot + '</span> ' + dials + '</span>';
+  }).join('') || '<span class="dial">(no data — hit ↻)</span>';
+  $('limits').innerHTML = rows +
+    '<span class="asof" id="limage"></span>' +
     '<button id="limref" title="probe both tokens now (~2 tiny calls; server allows at most one probe per 90s)">↻</button>';
   $('limref').onclick = () => fetchLimits(true, 'manual');
+  tickAge();
 }
+/* age of the last probe, not its clock time (operator directive 2026-07-31, #630): "3m", "2h", "1d".
+   Ticked every 20s so it stays honest without a re-probe. */
+const ago = (t) => {
+  const s = Math.max(0, (Date.now() - t) / 1000);
+  return s < 60 ? Math.round(s) + 's' : s < 3600 ? Math.round(s / 60) + 'm'
+    : s < 86400 ? Math.round(s / 3600) + 'h' : Math.round(s / 86400) + 'd';
+};
+function tickAge() {
+  const el = $('limage'), d = limitsData;
+  if (!el) return;
+  const at = d && d.at ? new Date(d.at).getTime() : 0;
+  el.textContent = at ? ago(at) : 'never';
+  el.title = at ? 'last probe ' + ago(at) + ' ago (' + new Date(at).toLocaleString() + ')' +
+    (d.why ? ' · ' + String(d.why) : '') : 'never probed';
+}
+setInterval(tickAge, 20000);
 async function fetchLimits(probe, why) {
   try {
     const r = await fetch('/limits?k=' + K + (probe ? '&probe=1&why=' + encodeURIComponent(why || 'page') : ''));
@@ -899,7 +1012,20 @@ function fitTo(cs) {
 function fitAll() { fitTo([...CARDS.values()]); }
 $('fit').onclick = fitAll;
 $('newcard').onclick = () => openEditor(null, null);
-/* find a card by number (the operator 2026-07-29, #387): accepts "123" or "#123";
+/* (?) popover: gesture legend + limits legend, out of the titlebar (operator directive 2026-07-31, #626) */
+function toggleHelp(on) {
+  const b = $('helpbox');
+  const show = on === undefined ? b.style.display !== 'block' : on;
+  b.style.display = show ? 'block' : 'none';
+  $('help').classList.toggle('on', show);
+}
+$('help').onclick = (e) => { e.stopPropagation(); toggleHelp(); };
+/* tapping the feather opens the same popover — it leads with who {{AGENT_NAME}} is (#630) */
+$('brand').onclick = (e) => { e.stopPropagation(); toggleHelp(); };
+document.addEventListener('pointerdown', (e) => {
+  if ($('helpbox').style.display === 'block' && !e.target.closest('#helpbox,#help,#brand')) toggleHelp(false);
+});
+/* find a card by number (operator directive 2026-07-29, #387): accepts "123" or "#123";
    selects + opens the card and centers the view on it */
 function findCard() {
   const m = $('findn').value.match(/\d+/);
@@ -919,7 +1045,7 @@ function findCard() {
   $('findn').value = ''; $('findn').blur();
 }
 $('find').onclick = findCard;
-/* back button (the operator 2026-07-29, #393): each find pushes the pre-jump state
+/* back button (operator directive 2026-07-29, #393): each find pushes the pre-jump state
    (selection + viewport) onto a stack; back pops and restores it */
 const backStack = [];
 function pushBack() {
@@ -933,7 +1059,7 @@ $('back').onclick = () => {
   if (!st) return;
   sel.clear();
   for (const id of st.sel) if (CARDS.has(id)) sel.add(id);
-  for (const id of sel) expanded.add(id);      // OPEN the card we return to (the operator 2026-07-29, #410)
+  for (const id of sel) expanded.add(id);      // OPEN the card we return to (operator directive 2026-07-29, #410)
   if (sel.size) { saveExp(); markSeen([...sel]); }
   render();
   V.s = st.V.s; V.tx = st.V.tx; V.ty = st.V.ty;
@@ -946,6 +1072,7 @@ $('findn').addEventListener('keydown', (e) => {
 });
 document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape') {
+    if ($('helpbox').style.display === 'block') return toggleHelp(false);
     if (editorOpen) return closeEditor();
     if (sel.size) { sel.clear(); render(); }
   }

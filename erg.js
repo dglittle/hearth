@@ -207,16 +207,33 @@ function modelAllowed(tok, model) {
   return true;
 }
 
+// ---- stop control (board ⛔ → server `erg-stop` → SIGTERM here) ----
+// SIGTERM = clean stop: kill the claude child (TERM, KILL after 10s), skip
+// retries, and let finalize() run normally — locks released, cost line and
+// "⛔ stopped" recorded on the output card. SIGKILL remains the dirty path
+// (reaper cleans up).
+let CHILD = null, STOPPED = false;
+process.on('SIGTERM', () => {
+  if (STOPPED) return;
+  STOPPED = true;
+  log('erg #' + ERG + ' SIGTERM received — stopping (board ⛔)');
+  if (CHILD) {
+    try { CHILD.kill('SIGTERM'); } catch (_) {}
+    setTimeout(() => { try { if (CHILD) CHILD.kill('SIGKILL'); } catch (_) {} }, 10_000).unref();
+  }
+});
+
 // ---- async claude run with hard timeout ----
 function runClaude(args, env) {
   return new Promise((resolve) => {
     const ch = spawn(CLAUDE, args, { cwd: HOME, env });
+    CHILD = ch;
     let out = '', err = '';
     ch.stdout.on('data', (d) => { out += d; });
     ch.stderr.on('data', (d) => { err += d; });
     const killer = setTimeout(() => { try { ch.kill('SIGKILL'); } catch (_) {} }, TIMEOUT_MS);
-    ch.on('close', (code) => { clearTimeout(killer); resolve({ status: code, stdout: out, stderr: err }); });
-    ch.on('error', (e) => { clearTimeout(killer); resolve({ status: -1, stdout: out, stderr: String(e.message) }); });
+    ch.on('close', (code) => { CHILD = null; clearTimeout(killer); resolve({ status: code, stdout: out, stderr: err }); });
+    ch.on('error', (e) => { CHILD = null; clearTimeout(killer); resolve({ status: -1, stdout: out, stderr: String(e.message) }); });
   });
 }
 
@@ -242,6 +259,7 @@ function runClaude(args, env) {
   let r, res, ok = false, sid, t0 = Date.now(), tokSlot = 1, model = MODEL, ran = false;
   const skipped = [];
   for (let attempt = 0; attempt < PLAN.length; attempt++) {
+    if (STOPPED) break;
     tokSlot = PLAN[attempt].slot; model = PLAN[attempt].model;
     if (TOKS[tokSlot - 1] && !modelAllowed(TOKS[tokSlot - 1], model)) {
       skipped.push(model + '@tok' + tokSlot);
@@ -269,6 +287,7 @@ function runClaude(args, env) {
     res = null; try { res = JSON.parse(r.stdout); } catch (_) {}
     ok = !!res && !res.is_error && r.status === 0;
     if (ok) break;
+    if (STOPPED) { log('erg #' + ERG + ' stopped mid-run — no retry'); break; }
     const errTxt = (((res && res.result) || '') + ' ' + (r.stderr || '')).slice(0, 2000);
     if (attempt + 1 < PLAN.length && LIMIT_RE.test(errTxt)) {
       const nxt = PLAN[attempt + 1];
@@ -298,8 +317,9 @@ async function finalize(ok, res, r, t0, ran, sid, tokSlot = 1, model = MODEL) {
   const u = (res && res.usage) || null;
   const tok = u ? { in: (u.input_tokens || 0), cached: (u.cache_read_input_tokens || 0) + (u.cache_creation_input_tokens || 0), out: (u.output_tokens || 0) } : null;
   const usd = (res && res.total_cost_usd) != null ? res.total_cost_usd : null;
-  const resultLine = String((res && res.result) || (r && r.stderr) || 'no output')
+  let resultLine = String((res && res.result) || (r && r.stderr) || 'no output')
     .replace(/\n/g, ' ').slice(0, 300);
+  if (STOPPED && !ok) resultLine = '⛔ stopped from the board (SIGTERM)';
 
   // costs table (the claude-p cost log — silent ledger, no UI panel)
   if (ran) try {

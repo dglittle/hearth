@@ -121,14 +121,17 @@ const commands = {
     console.log(`  by ${c.created_by} at ${c.created_at} · updated ${c.updated_at}` +
       (c.url ? `\n  url: ${c.url}` : ''));
     if (c.body) console.log('  ---\n' + String(c.body).replace(/^/gm, '  '));
-    // parent chain, depth 3, 'child' links only
+    // parent chain, depth 3, 'child' links only; seen-set dedupes across
+    // branches/levels (diamonds, shortcut links, cycles)
     let level = [id];
+    const seen = new Set(level);
     for (let d = 1; d <= 3 && level.length; d++) {
       const qs = level.map(() => '?').join(',');
       const parents = db.prepare(
         `SELECT DISTINCT p.* FROM links l JOIN cards p ON p.id = l.parent
-         WHERE l.child IN (${qs}) AND l.kind = 'child'`).all(...level);
-      for (const p of parents) console.log(`  ${'^'.repeat(d)} ${line(p)}`);
+         WHERE l.child IN (${qs}) AND l.kind = 'child'`).all(...level)
+        .filter(p => !seen.has(p.id));
+      for (const p of parents) { seen.add(p.id); console.log(`  ${'^'.repeat(d)} ${line(p)}`); }
       level = parents.map(p => p.id);
     }
     const refs = db.prepare(
@@ -230,8 +233,8 @@ const commands = {
     const qs = ids.map(() => '?').join(',');
     db.exec('BEGIN IMMEDIATE');
     const r = db.prepare(
-      `UPDATE cards SET lock_erg = ?, lock_at = ? WHERE id IN (${qs}) AND lock_erg IS NULL`)
-      .run(erg, now(), ...ids);
+      `UPDATE cards SET lock_erg = ?, lock_at = ?, updated_at = ? WHERE id IN (${qs}) AND lock_erg IS NULL`)
+      .run(erg, now(), now(), ...ids);  // updated_at bump: 🔒 flips must ride the board's delta polls (card #614)
     if (r.changes !== ids.length) {
       db.exec('ROLLBACK');
       const held = db.prepare(
@@ -253,10 +256,10 @@ const commands = {
     if (pos.length) {
       const ids = pos.map(v => intArg(v, 'id'));
       const qs = ids.map(() => '?').join(',');
-      r = db.prepare(`UPDATE cards SET lock_erg = NULL, lock_at = NULL
-                      WHERE id IN (${qs}) AND lock_erg = ?`).run(...ids, erg);
+      r = db.prepare(`UPDATE cards SET lock_erg = NULL, lock_at = NULL, updated_at = ?
+                      WHERE id IN (${qs}) AND lock_erg = ?`).run(now(), ...ids, erg);
     } else {  // release all leftovers held by this erg
-      r = db.prepare('UPDATE cards SET lock_erg = NULL, lock_at = NULL WHERE lock_erg = ?').run(erg);
+      r = db.prepare('UPDATE cards SET lock_erg = NULL, lock_at = NULL, updated_at = ? WHERE lock_erg = ?').run(now(), erg);
     }
     console.log(`unlocked ${r.changes} card(s) for erg:${erg}`);
   },
@@ -310,7 +313,7 @@ const commands = {
     db.exec('BEGIN IMMEDIATE');
     db.prepare('UPDATE ergs SET status = ?, ended_at = ?, result = ? WHERE id = ?')
       .run(st, now(), flags.result !== undefined ? String(flags.result) : null, id);
-    const r = db.prepare('UPDATE cards SET lock_erg = NULL, lock_at = NULL WHERE lock_erg = ?').run(id);
+    const r = db.prepare('UPDATE cards SET lock_erg = NULL, lock_at = NULL, updated_at = ? WHERE lock_erg = ?').run(now(), id);
     db.exec('COMMIT');
     console.log(`erg:${id} ${st}; released ${r.changes} lock(s)`);
   },
@@ -384,8 +387,8 @@ function reap(db, quiet) {
     const stale = (h.lock_at && h.lock_at < cutoff) || !pidAlive(h.pid);
     if (!stale) continue;
     db.exec('BEGIN IMMEDIATE');
-    db.prepare('UPDATE cards SET lock_erg = NULL, lock_at = NULL WHERE id = ? AND lock_erg = ?')
-      .run(h.id, h.lock_erg);
+    db.prepare('UPDATE cards SET lock_erg = NULL, lock_at = NULL, updated_at = ? WHERE id = ? AND lock_erg = ?')
+      .run(now(), h.id, h.lock_erg);
     db.prepare(`UPDATE ergs SET status = 'failed', ended_at = COALESCE(ended_at, ?)
                 WHERE id = ? AND status = 'running'`).run(now(), h.lock_erg);
     db.exec('COMMIT');

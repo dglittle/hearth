@@ -121,6 +121,15 @@ const show6 = run(['show', '6']);
 ok(show6.includes('^ #3') && show6.includes('^^ #1'), 'show walks parent chain 2 deep', show6);
 ok(show6.includes('~ref~ #5'), 'show lists ref parents', show6);
 
+// 14b. branchy parent walk dedupes across levels (shortcut link: #7 -> {3,6}, 6 -> 3)
+run(['create', '--kind', 'work', '--title', 'branchy child', '--status', 'ready',
+  '--parent', '3', '--parent', '6']);  // #7 (note: #6's parent is also #3)
+const show7 = run(['show', '7']);
+ok((show7.match(/\^+ #3 /g) || []).length === 1,
+  'shortcut parent #3 printed once, at nearest depth', show7);
+ok(show7.includes('^^ #1') && !show7.includes('^^ #3'),
+  'walk continues past dedupe to grandparent #1', show7);
+
 // 15. link/unlink
 ok(run(['link', '5', '2', '--kind', 'ref']).includes('linked'), 'link ref');
 ok(runFail(['link', '5', '2']).status === 1, 'duplicate link refused');

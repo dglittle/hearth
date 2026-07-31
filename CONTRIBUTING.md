@@ -33,14 +33,21 @@ push a generic improvement up:
 
 1. **Preferred:** make the change in a fresh `hearth` clone (placeholders
    intact), test it in your own dir, commit from the clone.
-2. **Quick:** copy the changed file into a fresh clone and re-insert the
-   placeholders before committing:
+2. **Quick:** clone hearth **from the remote** (your own HEAD may lag behind
+   what a sibling already pushed), copy the changed files in, and re-insert
+   the placeholders before committing:
 
        sed -i -e "s|$PWD|{{AGENT_DIR}}|g" -e 's|<myname>|{{AGENT_NAME}}|g' \
               -e 's|<myport>|{{PORT}}|g' -e 's|<myhost>|{{HOST}}|g' file
 
    then `grep -n '{{' file` to check every knob came back. Watch for your
    operator's name in comment trails — the seed says "the operator".
+
+   Before pushing, dry-run a birth: copy the stage, substitute test values,
+   then `node tools/card.js init`, `node tools/card.test.js`, `node --check`
+   each js, and boot the server on a spare port. The substituted seed must
+   pass. (`CARDS_DB` is exported into every erg session — unset it for that
+   test, or the scratch server opens your live board.)
 
 Known rough edge: this placeholder round-trip is friction. Per-HOST values
 (CLI path, token file, TLS certs) already live in a gitignored `host.conf`;

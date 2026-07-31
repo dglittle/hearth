@@ -70,8 +70,8 @@ function reap(force) {
     if (!((h.lock_at && h.lock_at < cutoff) || !alive(h.pid))) continue;
     db.exec('BEGIN IMMEDIATE');
     try {
-      db.prepare('UPDATE cards SET lock_erg = NULL, lock_at = NULL WHERE id = ? AND lock_erg = ?')
-        .run(h.id, h.lock_erg);
+      db.prepare('UPDATE cards SET lock_erg = NULL, lock_at = NULL, updated_at = ? WHERE id = ? AND lock_erg = ?')
+        .run(nowIso(), h.id, h.lock_erg);
       db.prepare(`UPDATE ergs SET status = 'failed', ended_at = COALESCE(ended_at, ?)
                   WHERE id = ? AND status = 'running'`).run(nowIso(), h.lock_erg);
       db.exec('COMMIT');
@@ -102,7 +102,7 @@ function archiveCard(id) {  // status + geometry agree (design §3): archived �
     .run(...(slot ? [nowIso(), slot.x, slot.y, id] : [nowIso(), id]));
 }
 
-// ---- plain archive = just that card (the operator 2026-07-29, card #299) ----
+// ---- plain archive = just that card (operator directive 2026-07-29, card #299) ----
 // Supersedes the #256a "pull lone ancestors" behavior (2026-07-28): the 📥
 // button archives exactly the highlighted cards, nothing else. Ancestors and
 // descendants are only swept by 🗄 archive-thread.
@@ -151,10 +151,18 @@ function archiveThread(id) {
 const CARD_COLS = 'id,kind,title,body,status,x,y,w,h,importance,urgency,url,created_by,created_at,updated_at,lock_erg,lock_at';
 function dataState(since) {
   reap(false);
-  const full = !since;
+  // Delta overlap (card #614): writers stamp updated_at BEFORE their commit
+  // lands — BEGIN IMMEDIATE can wait seconds behind busy_timeout, so a poll
+  // can advance `since` past a timestamp whose row isn't visible yet; that
+  // row would then never appear in any delta ("new erg card only after
+  // reload"). Re-sending a 15s overlap makes deltas race-proof; the client
+  // upsert (CARDS.set) is idempotent.
+  const ts = since ? Date.parse(since) : NaN;
+  const full = !since || Number.isNaN(ts);
+  const wm = full ? null : new Date(ts - 15_000).toISOString().replace(/\.\d+Z$/, 'Z');
   const cards = full
     ? db.prepare(`SELECT ${CARD_COLS} FROM cards`).all()
-    : db.prepare(`SELECT ${CARD_COLS} FROM cards WHERE updated_at >= ?`).all(since);
+    : db.prepare(`SELECT ${CARD_COLS} FROM cards WHERE updated_at >= ?`).all(wm);
   const ids = db.prepare('SELECT id FROM cards').all().map((r) => r.id);
   const links = db.prepare('SELECT parent, child, kind FROM links').all();
   const ergs = db.prepare(
@@ -261,7 +269,7 @@ const ACTIONS = {
     return tx(() => {
       mustCard(id);
       if (p.status === 'archived') {         // status ⇒ archive-grid geometry;
-        archiveCard(id);                     // just this card (the operator 2026-07-29, #299)
+        archiveCard(id);                     // just this card (operator directive 2026-07-29, #299)
         recordAct('status', { ...p, archived: [id] });
         return { id, status: p.status, archived: [id] };
       }
@@ -326,6 +334,42 @@ const ACTIONS = {
       log('erg fired on card(s) #' + ids.join(',#') + ' (pid ' + child.pid + ')');
       return { pid: child.pid, card_ids: ids };
     });
+  },
+
+  'erg-stop'(p) {  // board ⛔: SIGTERM the erg.js process — it kills its claude
+    // child and finalizes cleanly (locks, cost line, "⛔ stopped" on the card).
+    // Match by erg_id, or by card_ids (a card the erg locked / its output card).
+    const ergId = intOrNull(p.erg_id, 'erg_id');
+    let rows;
+    if (ergId != null) {
+      rows = db.prepare(`SELECT id, pid, status FROM ergs WHERE id = ?`).all(ergId);
+    } else {
+      const ids = (p.card_ids || []).map((v) => intOrNull(v, 'card_id'));
+      if (!ids.length) throw new Error('erg_id or card_ids[] required');
+      const qs = ids.map(() => '?').join(',');
+      rows = db.prepare(
+        `SELECT DISTINCT id, pid, status FROM ergs WHERE status = 'running' AND
+         (info_card IN (${qs}) OR id IN (SELECT lock_erg FROM cards WHERE id IN (${qs}) AND lock_erg IS NOT NULL))`
+        ).all(...ids, ...ids);
+    }
+    const stopped = [];
+    for (const e of rows) {
+      if (e.status !== 'running' || !alive(e.pid)) continue;
+      try { process.kill(e.pid, 'SIGTERM'); } catch (_) { continue; }
+      stopped.push(e.id);
+      const pid = e.pid;   // hard fallback: still alive after 25s → SIGKILL the
+      setTimeout(() => {   // whole group (erg.js is detached = group leader), reap
+        if (!alive(pid)) return;
+        log('erg pid ' + pid + ' ignored SIGTERM — SIGKILL group');
+        try { process.kill(-pid, 'SIGKILL'); } catch (_) {}
+        try { process.kill(pid, 'SIGKILL'); } catch (_) {}
+        setTimeout(() => reap(true), 2000).unref();
+      }, 25_000).unref();
+    }
+    if (!stopped.length) { const e = new Error('no live running erg matched'); e.code = 409; throw e; }
+    recordAct('erg-stop', { ...p, stopped });
+    log('⛔ stop sent to erg(s) ' + stopped.join(','));
+    return { stopped };
   },
 };
 
