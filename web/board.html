@@ -1066,7 +1066,10 @@ function openEditor(c, parents) {
   edCard = c || null; edParents = parents || null; editorOpen = true;
   $('ed-head').textContent = c ? `edit #${c.id} (${c.kind})`
     : parents && parents.length ? '+ child of ' + parents.map((p) => '#' + p).join(' ') : '+ new card';
-  $('ed-kind').style.display = c ? 'none' : '';
+  /* kind is editable on existing cards too (operator directive 2026-08-01); if the
+     card's kind isn't in the list (e.g. 'erg'), add it so the select is honest */
+  if (c && ![...$('ed-kind').options].some((o) => o.value === c.kind))
+    $('ed-kind').add(new Option(c.kind));
   $('ed-kind').value = c ? c.kind : 'human';   // the operator's UI → their cards default to human
   $('ed-title').value = c ? c.title : '';
   $('ed-body').value = c ? c.body : '';
@@ -1099,7 +1102,7 @@ function restoreEditor() {
   if (!s) return;
   const c = s.id != null ? CARDS.get(s.id) : null;
   openEditor(c, c ? null : (s.parents || null));   // card gone → fall back to new-card, text kept
-  if (!c) $('ed-kind').value = s.kind || 'human';
+  if (s.kind) $('ed-kind').value = s.kind;         // honor an in-flight kind change too
   $('ed-title').value = s.title || '';
   $('ed-body').value = s.body || '';
   $('ed-url').value = s.url || '';
@@ -1116,7 +1119,8 @@ $('ed-save').onclick = async () => {
   const urg = $('ed-urg').value ? +$('ed-urg').value : null;
   let r;
   if (edCard) {
-    r = await act({ action: 'edit', id: edCard.id, title, body, url, imp, urg });
+    r = await act({ action: 'edit', id: edCard.id, title, body, url, imp, urg,
+      kind: $('ed-kind').value });
     if (r) toast('saved #' + edCard.id);
   } else {
     const p = { action: 'create', kind: $('ed-kind').value, title, body, imp, urg,

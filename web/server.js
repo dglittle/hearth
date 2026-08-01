@@ -232,6 +232,11 @@ const ACTIONS = {
   edit(p) {
     const id = intOrNull(p.id, 'id');
     const sets = [], vals = [];
+    if (p.kind !== undefined) {   // kind is editable too (operator directive 2026-08-01)
+      p.kind = KIND_ALIAS[p.kind] || p.kind;
+      if (!KINDS.includes(p.kind)) throw new Error('kind must be one of: ' + KINDS.join(' '));
+      sets.push('kind = ?'); vals.push(p.kind);
+    }
     const F = { title: 's', body: 's', url: 's', imp: 'i', urg: 'i', x: 'n', y: 'n', w: 'n', h: 'n' };
     const COL = { imp: 'importance', urg: 'urgency' };
     for (const [k, ty] of Object.entries(F)) {
