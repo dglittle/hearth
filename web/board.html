@@ -298,6 +298,7 @@
     <span>⇧drag</span><span>lasso</span>
     <span>drag card</span><span>move it</span>
     <span>2×tap</span><span>edit</span>
+    <span>✦ (panel)</span><span>mark a card new again</span>
   </div>
   <h5 class="n">limits dials</h5>
   <p><b>t1</b>/<b>t2</b> = the two subscription tokens. Per token: <b>5h</b> rolling
@@ -761,6 +762,7 @@ function renderPanel() {
         <span class="pbtns">
           ${c.url ? `<button data-act="url" data-url="${esc(c.url)}" title="open link">↗</button>` : ''}
           <button data-act="find" title="center the board on this card">◎</button>
+          <button data-act="new" title="mark as new again (like gmail's unread) &amp; close">✦</button>
           <button data-act="edit" title="edit this card">✏️</button>
           <button data-act="close" title="close (leaves it selected)">✕</button>
         </span></div>
@@ -795,6 +797,18 @@ $('panel').addEventListener('click', (e) => {
     case 'find': if (c) { pushBack(); centerOn(c); } break;
     case 'edit': if (c) openEditor(c); break;
     case 'close': expanded.delete(id); saveExp(); uiSync(); break;
+    /* mark as new again (operator directive 2026-08-01) — gmail-style "mark
+       unread": drop the id from the seen-set so the card gets its gold
+       fresh-glow + ✦ badge back. Close AND deselect it, else the very next
+       drag/lasso on the still-selected card would re-mark it seen. Full
+       render(), not uiSync(): the fast path only ever REMOVES the fresh
+       class. */
+    case 'new':
+      if (seen) { seen.delete(id); saveSeen(); }
+      expanded.delete(id); saveExp(); sel.delete(id);
+      render();
+      toast('✦ #' + id + ' is new again');
+      break;
   }
 });
 
