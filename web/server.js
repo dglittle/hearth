@@ -49,6 +49,7 @@ const alive = (pid) => { try { process.kill(pid, 0); return true; } catch (_) { 
 // ---- db (single handle; WAL: reads never block the erg writers) ----
 const db = new DatabaseSync(DB_PATH);
 db.exec('PRAGMA busy_timeout = 10000; PRAGMA foreign_keys = ON;');
+try { db.exec('ALTER TABLE ergs ADD COLUMN sid TEXT'); } catch (_) {}  // migration (warm-resume, card #756)
 
 const KINDS = ['mind', 'short-term', 'long-term', 'human', '{{AGENT_NAME}}', 'erg', 'header'];
 // two-kind interface (operator directive 2026-07-29, card #275); aliases for stray callers
@@ -169,8 +170,36 @@ function dataState(since) {
     `SELECT id, target_card, info_card, pid, status, started_at, ended_at, result FROM ergs
      WHERE status = 'running' OR id IN (SELECT id FROM ergs ORDER BY id DESC LIMIT 10)
      ORDER BY id`).all().map((e) => ({ ...e, alive: e.status === 'running' && alive(e.pid) }));
+  // cumulative spend (operator directive 2026-08-02, #764): total across ALL ergs, for the
+  // titlebar 💸 widget. Tiny aggregate; rides the existing 5s poll.
+  const spend = db.prepare(
+    'SELECT COALESCE(SUM(usd),0) AS usd, COUNT(*) AS ergs FROM costs').get();
   return { ok: true, ver: pageVer(), full, generated_at: nowIso(), divider: 0,
-           cards, ids, links, ergs };
+           cards, ids, links, ergs, warm: warmSessions(), spend };
+}
+
+// ---- warm sessions (card #756): {{AGENT_NAME}} output cards whose claude session is
+// <1h old and resumable — erg.js resumes when a human CHILD of such a card is
+// ergged, so the board badges them (♨) as "reply here = dialog turn, cache hit".
+const RESUME_WINDOW_MS = 60 * 60_000;
+const TRANSCRIPTS = path.join(require('os').homedir(), '.claude', 'projects', HOME.replace(/[\/._]/g, '-'));
+function warmSessions() {
+  try {
+    const cut = new Date(Date.now() - RESUME_WINDOW_MS).toISOString().replace(/\.\d+Z$/, 'Z');
+    const rows = db.prepare(
+      `SELECT info_card AS card, sid, ended_at FROM ergs
+       WHERE status = 'done' AND sid IS NOT NULL AND info_card IS NOT NULL AND ended_at >= ?
+       ORDER BY ended_at DESC`).all(cut);
+    const seen = new Set(), warm = [];
+    for (const r of rows) {
+      if (seen.has(r.card)) continue;
+      seen.add(r.card);
+      if (!fs.existsSync(path.join(HOME, 'ergs', 'sys-' + r.sid + '.txt')) ||
+          !fs.existsSync(path.join(TRANSCRIPTS, r.sid + '.jsonl'))) continue;
+      warm.push({ card: r.card, until: Date.parse(r.ended_at) + RESUME_WINDOW_MS });
+    }
+    return warm;
+  } catch (_) { return []; }
 }
 
 // ---- /act: each action = ONE transaction + an acts row (audit/replay) ----
@@ -232,7 +261,7 @@ const ACTIONS = {
   edit(p) {
     const id = intOrNull(p.id, 'id');
     const sets = [], vals = [];
-    if (p.kind !== undefined) {   // kind is editable too (operator directive 2026-08-01)
+    if (p.kind !== undefined) {   // kind is editable too (operator directive 2026-08-01, #721)
       p.kind = KIND_ALIAS[p.kind] || p.kind;
       if (!KINDS.includes(p.kind)) throw new Error('kind must be one of: ' + KINDS.join(' '));
       sets.push('kind = ?'); vals.push(p.kind);

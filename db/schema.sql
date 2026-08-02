@@ -44,7 +44,8 @@ CREATE TABLE ergs (
   status      TEXT NOT NULL DEFAULT 'running',  -- 'running'|'done'|'failed'
   started_at  TEXT NOT NULL,
   ended_at    TEXT,
-  result      TEXT                  -- the DONE line
+  result      TEXT,                 -- the DONE line
+  sid         TEXT                  -- claude session id (warm-resume, card #756)
 );
 
 CREATE TABLE costs (                -- the claude-p cost log

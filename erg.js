@@ -80,6 +80,7 @@ const extra = restArgs.join(' ').trim();
 // ---- db (direct handle for reads + finalize writes; CLI for lifecycle) ----
 const db = new DatabaseSync(DB_PATH);
 db.exec('PRAGMA busy_timeout = 10000; PRAGMA foreign_keys = ON;');
+try { db.exec('ALTER TABLE ergs ADD COLUMN sid TEXT'); } catch (_) {}  // migration (warm-resume, card #756)
 
 function cardCli(args) {
   const r = spawnSync(process.execPath, [CARD_CLI, ...args], {
@@ -129,6 +130,40 @@ let outCard = null;
     console.error('erg.js: output card create failed: ' + (r.err || r.out));
     process.exit(1);
   }
+}
+
+// ---- warm-session resume (operator directive 2026-08-01, card #756) ----
+// If THE parent card is a human reply hanging under an {{AGENT_NAME}} output card
+// whose claude session ended <1h ago, this erg is a dialog turn: run
+// `claude -p --resume <sid>` with the ORIGINAL system prompt (stored at
+// ergs/sys-<sid>.txt) so the whole prior conversation is a prompt-cache read.
+// The resumed session's mind/tips are stale by design (the operator: "that's fine");
+// the prompt tells it to re-check the board for anything it needs fresh.
+const RESUME_WINDOW_MS = 60 * 60_000;
+const transcriptPath = (s) => path.join(os.homedir(), '.claude', 'projects', HOME.replace(/[\/._]/g, '-'), s + '.jsonl');
+const sysPath = (s) => path.join(ERGS_DIR, 'sys-' + s + '.txt');
+function findResume() {
+  if (parents.length !== 1) return null;
+  const p = db.prepare('SELECT id, kind FROM cards WHERE id = ?').get(parents[0]);
+  if (!p || p.kind !== 'human') return null;
+  let rows = [];
+  try {
+    rows = db.prepare(
+      `SELECT e.id AS erg, e.sid, e.ended_at, c.id AS card, co.model FROM links l
+         JOIN cards c ON c.id = l.parent AND c.kind = '{{AGENT_NAME}}'
+         JOIN ergs e ON e.info_card = c.id AND e.status = 'done' AND e.sid IS NOT NULL
+         LEFT JOIN costs co ON co.erg_id = e.id
+       WHERE l.child = ? AND l.kind = 'child'
+       ORDER BY e.ended_at DESC`).all(p.id);
+  } catch (_) { return null; }
+  for (const r of rows) {
+    if (!r.ended_at || Date.now() - Date.parse(r.ended_at) > RESUME_WINDOW_MS) continue;
+    if (!fs.existsSync(transcriptPath(r.sid))) continue;
+    let sys = null;
+    try { sys = fs.readFileSync(sysPath(r.sid), 'utf8'); } catch (_) { continue; }
+    return { sid: r.sid, card: r.card, erg: r.erg, model: r.model || MODEL, sys };
+  }
+  return null;
 }
 
 // ---- system prompt: mind cards + ready-tips index + harness facts ----
@@ -216,6 +251,7 @@ function modelAllowed(tok, model) {
 // version hung the full child runtime here — 5m at 01:07Z, 120s in the
 // sandbox retest). SIGKILL from outside remains the dirty path (reaper).
 let CHILD = null, STOPPED = false;
+let RESUMED = false, SYS_USED = '';   // warm-resume state for finalize (card #756)
 function killChildTree(sig) {
   if (!CHILD) return;
   try { process.kill(-CHILD.pid, sig); }         // whole group (claude is a group leader)
@@ -263,10 +299,33 @@ function runClaude(args, env) {
   if (extra) prompt += '\n\n' + extra;
   const sysPrompt = buildSystemPrompt();
 
-  // Attempt plan: every token on the preferred model, then on the fallback
+  // warm-session resume candidate (card #756): dialog turn on a live session
+  const resume = findResume();
+  let resumePrompt = null;
+  if (resume) {
+    const shown = cardCli(['show', String(parents[0])]);
+    resumePrompt = promptTs + '♨ RESUMED SESSION — you are the same session that produced output card #' +
+      resume.card + ' (erg #' + resume.erg + '). the operator replied: card #' + parents[0] +
+      ', a child of your #' + resume.card + ', and this continuation erg was fired on it.\n' +
+      'Continuation harness facts:\n' +
+      '- You are now erg:' + ERG + ' (ERG_ID is updated in your environment); parent card #' + parents[0] + ' is locked for you.\n' +
+      '- Card #' + outCard + ' is your NEW output card — same rules as before: progress-edit its title while working, finalize title/body/--imp/--urg before exit.\n' +
+      '- Your context predates this reply: mind cards, tips, and board state may have drifted — `card show`/`card search` anything you need fresh; trust the board over memory.\n\n' +
+      '── the operator\'s reply — card #' + parents[0] + ' and its chain ──\n' +
+      (shown.status === 0 ? shown.out : '(show failed: ' + shown.err + ')') +
+      (extra ? '\n\n' + extra : '');
+    log('erg #' + ERG + ' warm-resume candidate: session ' + resume.sid + ' of erg #' + resume.erg +
+      ' (output card #' + resume.card + ', model ' + resume.model + ')');
+  }
+
+  // Attempt plan: resume attempts first (pinned to the session's original
+  // model — a model switch would cold-miss the cache anyway), then the normal
+  // fresh plan: every token on the preferred model, then on the fallback
   // (the fable weekly bucket can be dry while opus budget remains). Model is
-  // deliberately NOT sticky; token slot is (tok-pref.json).
+  // deliberately NOT sticky; token slot is (tok-pref.json). A failed resume
+  // attempt (any error, not just limits) falls through to a fresh session.
   const PLAN = [];
+  if (resume) for (const s of SLOT_ORDER) PLAN.push({ slot: s, model: resume.model, resume: true });
   for (const m of [MODEL, FALLBACK_MODEL]) for (const s of SLOT_ORDER) PLAN.push({ slot: s, model: m });
   if (!PLAN.length) PLAN.push({ slot: 1, model: MODEL });   // no tokens configured — rely on ambient auth
 
@@ -275,26 +334,29 @@ function runClaude(args, env) {
   for (let attempt = 0; attempt < PLAN.length; attempt++) {
     if (STOPPED) break;
     tokSlot = PLAN[attempt].slot; model = PLAN[attempt].model;
+    const isResume = !!PLAN[attempt].resume;
     if (TOKS[tokSlot - 1] && !modelAllowed(TOKS[tokSlot - 1], model)) {
       skipped.push(model + '@tok' + tokSlot);
       log('budget probe: ' + model + ' rejected on token ' + tokSlot + ' — skipping');
       continue;
     }
-    sid = crypto.randomUUID();
+    sid = isResume ? resume.sid : crypto.randomUUID();
     const env = { ...baseEnv };
     if (TOKS[tokSlot - 1]) env.CLAUDE_CODE_OAUTH_TOKEN = TOKS[tokSlot - 1];
-    const args = ['-p', prompt, '--output-format', 'json',
+    const args = ['-p', isResume ? resumePrompt : prompt, '--output-format', 'json',
       '--model', model,
       '--setting-sources', 'user',            // no project source → no CLAUDE.md
       '--disable-slash-commands',             // no skills
       '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}',
       '--allowedTools', TOOLS, '--permission-mode', 'dontAsk',
-      '--system-prompt', sysPrompt,
-      '--session-id', sid];
+      '--system-prompt', isResume ? resume.sys : sysPrompt,
+      ...(isResume ? ['--resume', resume.sid] : ['--session-id', sid])];
     t0 = Date.now(); ran = true;
-    log('erg #' + ERG + ' begins ' + sid + ' [cards #' + parents.join(',#') + ' → out #' + outCard + ']' +
-      (model !== MODEL ? ' [' + model + ' — fable budget dry]' : '') +
-      (attempt ? ' (RETRY on token ' + tokSlot + ' after limit)'
+    RESUMED = isResume; SYS_USED = isResume ? resume.sys : sysPrompt;
+    log('erg #' + ERG + ' begins ' + sid + (isResume ? ' [♨ RESUME]' : '') +
+      ' [cards #' + parents.join(',#') + ' → out #' + outCard + ']' +
+      (model !== MODEL ? ' [' + model + (isResume ? ' — session model' : ' — fable budget dry') + ']' : '') +
+      (attempt ? ' (RETRY on token ' + tokSlot + ')'
                : (tokSlot !== 1 ? ' [token ' + tokSlot + ', remembered]' : '')) +
       (extra ? ' :: ' + extra.slice(0, 100).replace(/\n/g, ' ') : ''));
     r = await runClaude(args, env);
@@ -303,13 +365,15 @@ function runClaude(args, env) {
     if (ok) break;
     if (STOPPED) { log('erg #' + ERG + ' stopped mid-run — no retry'); break; }
     const errTxt = (((res && res.result) || '') + ' ' + (r.stderr || '')).slice(0, 2000);
-    if (attempt + 1 < PLAN.length && LIMIT_RE.test(errTxt)) {
+    if (attempt + 1 < PLAN.length && (LIMIT_RE.test(errTxt) || isResume)) {
       const nxt = PLAN[attempt + 1];
-      log('LIMIT HIT on ' + model + '/token ' + tokSlot + ' — retrying whole erg on ' +
+      log((isResume ? 'RESUME FAILED' : 'LIMIT HIT') + ' on ' + model + '/token ' + tokSlot +
+        ' — retrying whole erg ' + (nxt.resume ? 'as resume' : 'fresh') + ' on ' +
         nxt.model + '/token ' + nxt.slot +
         ' :: ' + errTxt.trim().slice(0, 200).replace(/\n/g, ' '));
       fs.appendFileSync(LEDGER, JSON.stringify({ erg: ERG, sid, start: new Date(t0).toISOString(),
         ms: Date.now() - t0, ok: false, limitHit: true, tokSlot, model,
+        resumed: isResume || undefined,
         extra: extra.slice(0, 120) || undefined }) + '\n');
       continue;
     }
@@ -348,6 +412,17 @@ async function finalize(ok, res, r, t0, ran, sid, tokSlot = 1, model = MODEL) {
   { const er = cardCli(['erg-end', String(ERG), '--status', ok ? 'done' : 'failed', '--result', resultLine]);
     if (er.status !== 0) log('erg-end failed: ' + er.err); }
 
+  // warm-resume bookkeeping (card #756): remember this erg's session id and
+  // persist the exact system prompt, so a the operator-reply child card can resume the
+  // session (<1h) with an identical prompt prefix → whole-context cache read.
+  if (ok && sid && sid !== 'no-session') try {
+    db.prepare('UPDATE ergs SET sid = ? WHERE id = ?').run(sid, ERG);
+    if (SYS_USED && !fs.existsSync(sysPath(sid))) {
+      fs.mkdirSync(ERGS_DIR, { recursive: true });
+      fs.writeFileSync(sysPath(sid), SYS_USED);
+    }
+  } catch (e) { log('warm-resume bookkeeping failed: ' + e.message); }
+
   // the output card (§5b): if no session ever launched, delete it; else
   // finalize title/status ONLY where the session left the placeholder, and
   // append the cost line to the body.
@@ -361,7 +436,7 @@ async function finalize(ok, res, r, t0, ran, sid, tokSlot = 1, model = MODEL) {
           ? ((ok ? '✅' : '✗') + ' erg #' + ERG + ': ' + resultLine).slice(0, 200)
           : (ok ? c.title : ('✗ ' + c.title).slice(0, 200));
         const status = c.status;   // 'ready' retired 2026-07-28: 'draft' IS the live status, no flip needed
-        const costLine = '\n\n⏱ ' + fmtDur(Date.now() - t0) + ' · ' + model +
+        const costLine = '\n\n⏱ ' + fmtDur(Date.now() - t0) + (RESUMED ? ' · ♨ resumed' : '') + ' · ' + model +
           (tok ? ' · ' + fmtTok(tok.in + tok.cached) + ' in (' + fmtTok(tok.cached) + ' cached) / ' + fmtTok(tok.out) + ' out' : '') +
           (usd != null ? ' · $' + usd.toFixed(2) : '');
         db.prepare('UPDATE cards SET title = ?, status = ?, body = ?, updated_at = ? WHERE id = ?')
@@ -375,6 +450,7 @@ async function finalize(ok, res, r, t0, ran, sid, tokSlot = 1, model = MODEL) {
     ms: Date.now() - t0, cost: usd,
     turns: (res && res.num_turns) != null ? res.num_turns : null,
     tok, ok, cards: parents, out: outCard,
+    resumed: RESUMED || undefined,
     tokSlot: tokSlot > 1 ? tokSlot : undefined,
     model: model !== MODEL ? model : undefined,
     extra: extra.slice(0, 120) || undefined }) + '\n');

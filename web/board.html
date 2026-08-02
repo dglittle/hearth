@@ -40,6 +40,7 @@
   #back:disabled { opacity:.35; cursor:default; }
   #ergrun { color:var(--c-erg); font-size:11px; white-space:nowrap; display:none; }
   #stamp { color:var(--dim); font-size:10.5px; white-space:nowrap; }
+  #spend { color:#c9a86a; font-size:11px; white-space:nowrap; }
   /* narrow window (≈ half a laptop screen): shed the last non-essential bits so
      the titlebar stays a single row — the info stays in the tooltips (#626) */
   @media (max-width:900px) { #stamp .cnt { display:none; } }
@@ -214,6 +215,9 @@
      their own (live ergs, .pulse below). */
   .node.fresh { background:#2c2410; border-color:#e8c15a; }
   .node .nb { color:#e8c15a; font-weight:700; flex-shrink:0; }
+  /* ♨ warm session (card #756): this output card's claude session is <1h old —
+     erg a human REPLY (child card) and it resumes the dialog on the prompt cache */
+  .node .hb, .pcard .hb { color:#e07a4f; flex-shrink:0; cursor:default; }
   @keyframes pulse {
     0%,100% { box-shadow:0 0 0 1.5px #5fd3a566, 0 0 8px #5fd3a522; }
     50%     { box-shadow:0 0 0 2.5px #5fd3a5,   0 0 26px #5fd3a599; } }
@@ -280,6 +284,8 @@
        titlebar fits one row in a half-screen window -->
   <button id="help" title="gestures &amp; legend">?</button>
   <span id="ergrun"></span>
+  <!-- cumulative spend, all ergs ever (operator directive 2026-08-02, #764) -->
+  <span id="spend" title="cumulative spend"></span>
   <span id="limits" title="subscription usage — tap ? for the legend">…</span>
   <span id="stamp"></span>
 </div>
@@ -442,7 +448,7 @@ function mdFull(s) {
 
 /* ---- state ---- */
 const CARDS = new Map();            // id -> card row
-let LINKS = [], ERGS = [], VER = null, since = '';
+let LINKS = [], ERGS = [], WARM = new Map(), VER = null, since = '';
 const sel = new Set(), expanded = new Set();
 /* expanded cards persist across reloads (operator directive 2026-07-29, #295): render
    write-throughs the set; boot restores it (re-selecting too, since render
@@ -514,7 +520,7 @@ async function act(p) {
 }
 
 /* ---- poll: full first, then ?since= deltas; reload on ver flip ---- */
-let lastErgsJson = '', lastLinksJson = '';
+let lastErgsJson = '', lastLinksJson = '', lastWarmJson = '';
 async function poll() {
   let d;
   try {
@@ -533,9 +539,10 @@ async function poll() {
   /* safety net (card #614): a create whose commit slipped past even the
      server's delta overlap ⇒ an id we've never seen. Refetch full once. */
   if (!d.full && d.ids.some((id) => !CARDS.has(id))) { since = ''; return poll(); }
-  const ej = JSON.stringify(d.ergs), lj = JSON.stringify(d.links);
-  const changed = d.cards.length || removed || ej !== lastErgsJson || lj !== lastLinksJson;
-  LINKS = d.links; ERGS = d.ergs; lastErgsJson = ej; lastLinksJson = lj;
+  const ej = JSON.stringify(d.ergs), lj = JSON.stringify(d.links), wj = JSON.stringify(d.warm || []);
+  const changed = d.cards.length || removed || ej !== lastErgsJson || lj !== lastLinksJson || wj !== lastWarmJson;
+  LINKS = d.links; ERGS = d.ergs; lastErgsJson = ej; lastLinksJson = lj; lastWarmJson = wj;
+  WARM = new Map((d.warm || []).map((w) => [w.card, w.until]));
   // erg finished while we watched → capture fresh limit dials
   // ("data from the most recent erg" — the probe rides the erg's tail)
   const nowRun = new Set(ERGS.filter((e) => e.status === 'running' && e.alive).map((e) => e.id));
@@ -547,6 +554,12 @@ async function poll() {
   // count, which hides itself on narrow windows (CSS) so the bar stays one row (#626)
   $('stamp').innerHTML = '<span class="cnt">' + CARDS.size + ' cards</span>';
   $('stamp').title = CARDS.size + ' cards · board data as of ' + d.generated_at.slice(11, 16) + 'Z';
+  // cumulative spend widget (operator directive 2026-08-02, #764): sum of claude -p costs, all ergs ever
+  if (d.spend) {
+    $('spend').textContent = '💸 $' + d.spend.usd.toFixed(2);
+    $('spend').title = 'cumulative spend: $' + d.spend.usd.toFixed(4) +
+      ' across ' + d.spend.ergs + ' ergs (claude -p cost log, since board birth)';
+  }
   if (changed) render();
 }
 
@@ -693,12 +706,14 @@ function render() {
     }
     const iu = (c.importance || c.urgency) ? ` · i${c.importance ?? '·'}u${c.urgency ?? '·'}` : '';
     const lk = c.lock_erg != null ? ' 🔒' : '';
+    const wu = WARM.get(c.id);                   // ♨ warm session (card #756)
+    const wb = wu && wu > Date.now() ? `<span class="hb" title="session warm for ${Math.max(1, Math.round((wu - Date.now()) / 60000))} more min — a reply card (child) ergged now resumes this dialog on the prompt cache">♨</span>` : '';
     const isChip = c.kind === 'long-term';       // long-term stays a chip; its body lives in the panel
     const tsTip = 'created ' + fmtTsFull(c.created_at) + ' by ' + c.created_by +
       (c.updated_at !== c.created_at ? ' · updated ' + fmtTsFull(c.updated_at) : '');
     html += `<div class="${cls}" data-id="${c.id}"
         style="left:${p.x}px;top:${p.y}px;width:${cw(c)}px;height:${isChip ? 34 : ch(c)}px">
-      <div class="top"><span>#${c.id}</span>${fresh ? '<span class="nb">✦ new</span>' : ''}<span class="st" style="color:${stColor[c.status]}">${stGlyph[c.status]}</span><span>${esc(c.kind)}${iu}${lk}</span><span class="ts" title="${esc(tsTip)}">${esc(fmtTsShort(c.created_at))}</span></div>
+      <div class="top"><span>#${c.id}</span>${fresh ? '<span class="nb">✦ new</span>' : ''}${wb}<span class="st" style="color:${stColor[c.status]}">${stGlyph[c.status]}</span><span>${esc(c.kind)}${iu}${lk}</span><span class="ts" title="${esc(tsTip)}">${esc(fmtTsShort(c.created_at))}</span></div>
       <div class="ttl">${esc(c.title)}</div>` +
       (isChip ? '' : `<div class="txt">${md(c.body)}</div>`) +
       `<div class="btns"><button class="b-x" title="${expanded.has(c.id) ? 'close the side panel' : 'open in the side panel'}">${expanded.has(c.id) ? '🗕' : '⤢'}</button>` +
@@ -755,8 +770,10 @@ function renderPanel() {
     const lk = c.lock_erg != null ? ' 🔒 erg:' + c.lock_erg : '';
     const tsTip = 'created ' + fmtTsFull(c.created_at) + ' by ' + c.created_by +
       (c.updated_at !== c.created_at ? ' · updated ' + fmtTsFull(c.updated_at) : '');
+    const wu = WARM.get(c.id);                   // ♨ warm session (card #756)
+    const wb = wu && wu > Date.now() ? `<span class="hb" title="session warm for ${Math.max(1, Math.round((wu - Date.now()) / 60000))} more min — a reply card (child) ergged now resumes this dialog on the prompt cache">♨</span>` : '';
     html += `<div class="pcard k-${c.kind} ${c.status === 'archived' ? 'arch' : ''}" data-id="${c.id}">
-      <div class="phead"><span class="pid">#${c.id}</span>
+      <div class="phead"><span class="pid">#${c.id}</span>${wb}
         <span class="st" style="color:${stColor[c.status]}">${stGlyph[c.status]}</span>
         <span>${esc(c.kind)}${iu}${lk}</span>
         <span class="pbtns">
@@ -1066,7 +1083,7 @@ function openEditor(c, parents) {
   edCard = c || null; edParents = parents || null; editorOpen = true;
   $('ed-head').textContent = c ? `edit #${c.id} (${c.kind})`
     : parents && parents.length ? '+ child of ' + parents.map((p) => '#' + p).join(' ') : '+ new card';
-  /* kind is editable on existing cards too (operator directive 2026-08-01); if the
+  /* kind is editable on existing cards too (operator directive 2026-08-01, #721); if the
      card's kind isn't in the list (e.g. 'erg'), add it so the select is honest */
   if (c && ![...$('ed-kind').options].some((o) => o.value === c.kind))
     $('ed-kind').add(new Option(c.kind));
