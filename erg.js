@@ -413,7 +413,7 @@ async function finalize(ok, res, r, t0, ran, sid, tokSlot = 1, model = MODEL) {
     if (er.status !== 0) log('erg-end failed: ' + er.err); }
 
   // warm-resume bookkeeping (card #756): remember this erg's session id and
-  // persist the exact system prompt, so a the operator-reply child card can resume the
+  // persist the exact system prompt, so an operator-reply child card can resume the
   // session (<1h) with an identical prompt prefix → whole-context cache read.
   if (ok && sid && sid !== 'no-session') try {
     db.prepare('UPDATE ergs SET sid = ? WHERE id = ?').run(sid, ERG);
