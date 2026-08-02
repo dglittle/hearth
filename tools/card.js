@@ -94,6 +94,17 @@ const TIPS_SQL = `
         AND ch.kind != 'erg' AND ch.status != 'archived')
   ORDER BY COALESCE(c.importance,5) + COALESCE(c.urgency,5) DESC, c.updated_at ASC`;
 
+/* interface quadrant (lower-right: x>0 && y>0) is reserved for human/{{AGENT_NAME}}
+   cards — the mind-card rule. Guard added erg 14 after short-term #57 was
+   created with --x 400 --y 1930 and leaked into the operator's interface. header is
+   exempt (labels go anywhere). Non-numeric/cleared coords pass. */
+function guardQuadrant(kind, x, y) {
+  if (kind === 'human' || kind === '{{AGENT_NAME}}' || kind === 'header') return;
+  const nx = Number(x), ny = Number(y);
+  if (Number.isFinite(nx) && Number.isFinite(ny) && nx > 0 && ny > 0)
+    die(`a ${kind} card may not be placed in the interface quadrant (x>0 && y>0 is for human/{{AGENT_NAME}} cards) — omit coords or use --x none --y none for auto-placement`);
+}
+
 function getCard(db, id) {
   const c = db.prepare('SELECT * FROM cards WHERE id = ?').get(id);
   if (!c) die(`no card #${id}`);
@@ -149,6 +160,7 @@ const commands = {
     let kind = String(flags.kind || '');
     kind = KIND_ALIAS[kind] || kind;
     if (!KINDS.includes(kind)) die(`--kind must be one of: ${KINDS.join(' ')}`);
+    guardQuadrant(kind, flags.x, flags.y);
     const title = (flags.title === undefined || flags.title === true) ? '' : String(flags.title);
     const status = flags.status ? normStatus(String(flags.status)) : 'draft';
     if (!STATUSES.includes(status)) die(`--status must be one of: ${STATUSES.join(' ')}`);
@@ -178,15 +190,22 @@ const commands = {
   edit({ pos, flags }) {
     const db = openDb();
     const id = intArg(pos[0], 'id');
-    getCard(db, id);
+    const cur = getCard(db, id);
+    if (flags.x !== undefined || flags.y !== undefined)
+      guardQuadrant(cur.kind,
+        flags.x !== undefined ? flags.x : cur.x,
+        flags.y !== undefined ? flags.y : cur.y);
     const sets = [], vals = [];
     if (flags.title !== undefined) { sets.push('title = ?'); vals.push(String(flags.title)); }
     if (flags.body !== undefined) { sets.push('body = ?'); vals.push(readBody(flags.body)); }
     if (flags.url !== undefined) { sets.push('url = ?'); vals.push(String(flags.url)); }
     if (flags.imp !== undefined) { sets.push('importance = ?'); vals.push(intArg(flags.imp, '--imp')); }
     if (flags.urg !== undefined) { sets.push('urgency = ?'); vals.push(intArg(flags.urg, '--urg')); }
-    if (flags.x !== undefined) { sets.push('x = ?'); vals.push(intArg(flags.x, '--x')); }
-    if (flags.y !== undefined) { sets.push('y = ?'); vals.push(intArg(flags.y, '--y')); }
+    // '--x none' / '--y none' (or 'null') clears the coord → board re-places the
+    // card by its kind-quadrant fallback (added erg 14 after #57 leaked into the interface)
+    const coord = (v, name) => (v === 'none' || v === 'null') ? null : intArg(v, name);
+    if (flags.x !== undefined) { sets.push('x = ?'); vals.push(coord(flags.x, '--x')); }
+    if (flags.y !== undefined) { sets.push('y = ?'); vals.push(coord(flags.y, '--y')); }
     if (!sets.length) die('nothing to edit (--title/--body/--url/--imp/--urg/--x/--y)');
     sets.push('updated_at = ?'); vals.push(now(), id);
     db.prepare(`UPDATE cards SET ${sets.join(', ')} WHERE id = ?`).run(...vals);
@@ -405,7 +424,7 @@ const HELP = `card — sqlite card-board CLI (db: ${DB_PATH})
   card show <id>                              card + body + parent chain (3) + children
   card create --kind K [--title T] [--body B|-] [--parent id]... [--ref id]...
               [--imp N] [--urg N] [--url U] [--x N --y N] [--by WHO]
-  card edit <id> [--title T] [--body B|-] [--url U] [--imp N] [--urg N] [--x N --y N]
+  card edit <id> [--title T] [--body B|-] [--url U] [--imp N] [--urg N] [--x N|none --y N|none]
   card status <id> draft|done|archived        ('draft' = live; 'ready' retired, accepted as alias)
   card link <parent> <child> [--kind child|ref] · card unlink <parent> <child>
   card archive-thread <id>  archive ancestors+descendants (shared live cards kept) + grid move
