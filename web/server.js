@@ -27,6 +27,16 @@ const BOOT = Date.now(); // part of the page version: restart => clients reload
 
 const PORT = parseInt(process.env.BOARD_PORT || '{{PORT}}', 10);
 const HOME = path.join(__dirname, '..');
+// Guard (sibling-agent incident, 2026-08-04): a CARDS_DB pointing outside this home
+// is almost certainly env leaked from an erg that relaunched us — one agent's board
+// relaunch once cross-wired a sibling agent's board to the wrong db for ~35h.
+// Ignore + scrub it (scrub so spawned ergs don't inherit it either) unless
+// BOARD_TEST=1 (test hook).
+if (process.env.CARDS_DB && !process.env.BOARD_TEST &&
+    !path.resolve(process.env.CARDS_DB).startsWith(path.resolve(HOME) + path.sep)) {
+  console.error('ignoring foreign CARDS_DB (leaked env?): ' + process.env.CARDS_DB);
+  delete process.env.CARDS_DB;
+}
 const DB_PATH = process.env.CARDS_DB || path.join(HOME, 'db', 'cards.db');
 const ERG_JS = path.join(HOME, 'erg.js');
 const REPORTS = path.join(HOME, 'output', 'reports'); // legacy 🧾 html companions
