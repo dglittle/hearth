@@ -564,6 +564,24 @@ async function poll() {
 /* ---- geometry ---- */
 const cw = (c) => c.w || 240, ch = (c) => c.h || 96;
 let posCache = new Map();
+/* default drop slot for a new/positionless child (operator directive 2026-08-06, #986):
+   directly beneath the parent — touching + aligned, exactly like 🗂 stack.
+   If the slot is already taken (a sibling stacked there), chain beneath the
+   occupant so nothing overlaps. Occupancy = exact (x,y) match of a visible
+   card's explicit pos or its cached display pos from this/last render. */
+function slotBelow(x, y, skipId) {
+  for (let i = 0; i < 80; i++) {
+    let occ = null;
+    for (const o of CARDS.values()) {
+      if (o.id === skipId || !visible(o)) continue;
+      const q = (o.x != null && o.y != null) ? o : posCache.get(o.id);
+      if (q && q.x === x && q.y === y) { occ = o; break; }
+    }
+    if (!occ) break;
+    y += ch(occ);
+  }
+  return { x, y };
+}
 function dispPos(c, depth) {
   if (c.x != null && c.y != null) return { x: c.x, y: c.y };
   const hit = posCache.get(c.id); if (hit) return hit;
@@ -593,7 +611,9 @@ function dispPos(c, depth) {
         const pp = dispPos(par, (depth || 0) + 1);
         if (pp.y > by) { by = pp.y; best = { par, pp }; }
       }
-      p = { x: best.pp.x + 26 + (c.id % 5) * 10, y: best.pp.y + ch(best.par) + 70 };
+      /* stack-style default (operator directive 2026-08-06, #986): touching + aligned under
+         the lowest parent; siblings chain via slotBelow (was +26x/+70y jitter) */
+      p = slotBelow(best.pp.x, best.pp.y + ch(best.par), c.id);
     }
   }
   posCache.set(c.id, p);
@@ -1140,11 +1160,11 @@ $('ed-save').onclick = async () => {
     const p = { action: 'create', kind: $('ed-kind').value, title, body, imp, urg,
       parents: edParents || [] };
     if (url) p.url = url;
-    if (edParents && edParents.length) {               // place below lowest parent
+    if (edParents && edParents.length) {   // stack-style: touching + aligned under lowest parent (operator directive 2026-08-06, #986)
       let bx = null, by = -Infinity, bh = 96;
       for (const pid of edParents) { const pc = CARDS.get(pid); if (!pc) continue;
         const pp = dispPos(pc); if (pp.y > by) { by = pp.y; bx = pp.x; bh = ch(pc); } }
-      if (bx != null) { p.x = bx + 26; p.y = by + bh + 70; }
+      if (bx != null) { const s = slotBelow(bx, by + bh); p.x = s.x; p.y = s.y; }
     } else { p.x = (boardW() / 2 - V.tx) / V.s - 120; p.y = (innerHeight / 2 - V.ty) / V.s - 48; }
     r = await act(p);
     if (r) { toast('created #' + r.id); sel.clear(); sel.add(r.id); markSeen([r.id]); }
@@ -1159,12 +1179,15 @@ const selCards = () => [...sel].map((id) => CARDS.get(id)).filter(Boolean);
 $('a-clear').onclick = () => { sel.clear(); uiSync(); };
 $('a-child').onclick = () => openEditor(null, [...sel]);
 $('a-edit').onclick = () => { const c = selCards()[0]; if (c) openEditor(c); };
-/* stack the selected cards (operator directive 2026-07-31, #702): the top-most one (smallest
-   display y; ties → left-most) STAYS PUT, the rest pile beneath it in their
-   current vertical order, each a touch right+down (7,30) so every card's
-   header line stays visible and tappable. Positions persist as absolute x/y.
-   A positionless base gets anchored first (#544 lesson: if a card being moved
-   is its parent, the base's rendered spot would drift mid-stack). */
+/* stack the selected cards (operator directive 2026-07-31 #702, reshaped 2026-08-05 #853):
+   the top-most one (smallest display y; ties → left-most) STAYS PUT; every
+   other card goes EXACTLY below its parent — same x, y = parent's bottom edge.
+   "Parent" = its DAG parent within the selection when placed; otherwise the
+   previously placed card (plain pile → clean column). If a parent's bottom
+   slot is already taken (siblings), chain under the occupant so nothing
+   overlaps. Positions persist as absolute x/y. A positionless base gets
+   anchored first (#544 lesson: if a card being moved is its parent, the
+   base's rendered spot would drift mid-stack). */
 $('a-stack').onclick = async () => {
   const ps = selCards().map((c) => ({ c, p: dispPos(c) }))
     .sort((a, b) => a.p.y - b.p.y || a.p.x - b.p.x);
@@ -1175,12 +1198,22 @@ $('a-stack').onclick = async () => {
     if (!r) return;
     base.c.x = base.p.x; base.c.y = base.p.y;
   }
-  let n = 0;
+  const ids = new Set(ps.map((e) => e.c.id));
+  const par = new Map();                       // child id → DAG parent id within selection
+  for (const l of LINKS)
+    if (l.kind === 'child' && ids.has(l.child) && ids.has(l.parent) && !par.has(l.child))
+      par.set(l.child, l.parent);
+  const fin = new Map([[base.c.id, { x: base.p.x, y: base.p.y }]]);  // id → placed pos
+  const below = new Map();                     // id → id of card sitting at its bottom edge
+  let n = 0, prev = base.c.id;
   for (let i = 1; i < ps.length; i++) {
     const { c } = ps[i];
-    const x = base.p.x + i * 7, y = base.p.y + i * 30;
+    let p = par.get(c.id);
+    if (p == null || !fin.has(p)) p = prev;    // parent absent/unplaced → under previous card
+    while (below.has(p)) p = below.get(p);     // slot taken by a sibling → chain beneath it
+    const pp = fin.get(p), x = pp.x, y = pp.y + ch(CARDS.get(p) || { h: 96 });
     const r = await act({ action: 'edit', id: c.id, x, y });
-    if (r) { c.x = x; c.y = y; n++; }
+    if (r) { c.x = x; c.y = y; n++; fin.set(c.id, { x, y }); below.set(p, c.id); prev = c.id; }
   }
   if (n) toast('🗂 stacked ' + (n + 1) + ' cards');
   render(); poll();
