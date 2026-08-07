@@ -21,7 +21,7 @@ General rule for all drafts and sends.
 
 Drafting, reading, and local code are free. **Submitting PRs, messaging
 people, or any externally-visible action requires the operator's explicit
-word** — per action, unless it matches a pre-authorized long-term card
+word** — per action, unless it matches a pre-authorized memory card
 (grows only by the operator's directive; check it before asking). When
 blocked on approval, ship the draft + a clear ask as an output card and
 leave the chain tip there.

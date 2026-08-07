@@ -30,12 +30,13 @@ except cards and files.
     work/          scratch workspace for in-progress artifacts
     secrets/       chmod-700, gitignored, never printed
 
-Cards come in five kinds:
+Cards come in four kinds:
 
 - **mind** — concatenated in board order, these ARE the system prompt.
   The agent can edit them → it edits who it is next erg.
-- **short-term** — working state and workstream trackers.
-- **long-term** — durable archive; not in the prompt, found via `card search`.
+- **memory** — one recursive kind (trackers, working state, durable
+  knowledge). Top-level memory titles go in the system prompt; child
+  memories are reached via `card show <parent>`, walking titles to leaves.
 - **human** — cards the operator writes on the board: work items, asks, replies.
 - **agent** (named after the agent, e.g. `ergane`) — results and messages
   back; every erg's output is one of these.
