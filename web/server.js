@@ -61,9 +61,11 @@ const db = new DatabaseSync(DB_PATH);
 db.exec('PRAGMA busy_timeout = 10000; PRAGMA foreign_keys = ON;');
 try { db.exec('ALTER TABLE ergs ADD COLUMN sid TEXT'); } catch (_) {}  // migration (warm-resume, card #756)
 
-const KINDS = ['mind', 'short-term', 'long-term', 'human', '{{AGENT_NAME}}', 'erg', 'header'];
+const KINDS = ['mind', 'memory', 'human', '{{AGENT_NAME}}', 'erg', 'header'];
 // two-kind interface (operator directive 2026-07-29, card #275); aliases for stray callers
-const KIND_ALIAS = { input: 'human', output: '{{AGENT_NAME}}', work: '{{AGENT_NAME}}' };
+// 'memory' replaces short-term/long-term (operator directive 2026-08-02, card #780)
+const KIND_ALIAS = { input: 'human', output: '{{AGENT_NAME}}', work: '{{AGENT_NAME}}',
+  'short-term': 'memory', 'long-term': 'memory' };
 const STATUSES = ['draft', 'done', 'archived'];  // 'ready' retired 2026-07-28 (all ergs explicit); 'draft' = live
 const normStatus = (s) => (s === 'ready' ? 'draft' : s);  // back-compat for stray callers
 

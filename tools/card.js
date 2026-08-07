@@ -17,10 +17,14 @@ const path = require('node:path');
 
 const DB_PATH = process.env.CARDS_DB || path.join(__dirname, '..', 'db', 'cards.db');
 const SCHEMA_PATH = path.join(__dirname, '..', 'db', 'schema.sql');
-const KINDS = ['mind', 'short-term', 'long-term', 'human', '{{AGENT_NAME}}', 'erg', 'header'];
+const KINDS = ['mind', 'memory', 'human', '{{AGENT_NAME}}', 'erg', 'header'];
 // two-kind interface (the operator 2026-07-29, card #275): lower-right = human + {{AGENT_NAME}} only;
 // old input/output/work kinds retired — aliases keep stray callers working.
-const KIND_ALIAS = { input: 'human', output: '{{AGENT_NAME}}', work: '{{AGENT_NAME}}' };
+// 'memory' replaces short-term/long-term (operator directive 2026-08-02, card #780): ONE
+// recursive kind; top-level memory TITLES go in the system prompt, child
+// memories are reached via `card show <parent>`.
+const KIND_ALIAS = { input: 'human', output: '{{AGENT_NAME}}', work: '{{AGENT_NAME}}',
+  'short-term': 'memory', 'long-term': 'memory' };
 const STATUSES = ['draft', 'done', 'archived'];  // 'ready' retired 2026-07-28 (all ergs explicit); 'draft' = live
 const normStatus = (s) => (s === 'ready' ? 'draft' : s);  // back-compat for stray callers
 const STALE_LOCK_MIN = 60;
@@ -87,7 +91,7 @@ function pidAlive(pid) {
 const TIPS_SQL = `
   SELECT c.* FROM cards c
   WHERE c.status = 'draft' AND c.lock_erg IS NULL
-    AND c.kind IN ('human','{{AGENT_NAME}}','short-term')
+    AND c.kind IN ('human','{{AGENT_NAME}}')
     AND NOT EXISTS (
       SELECT 1 FROM links l JOIN cards ch ON ch.id = l.child
       WHERE l.parent = c.id AND l.kind = 'child'

@@ -174,6 +174,21 @@ function buildSystemPrompt() {
      ORDER BY COALESCE(x,0), COALESCE(y,0), id`).all();
   for (const c of minds)
     parts.push('━━━ mind card #' + c.id + ' — ' + c.title + ' ━━━\n' + String(c.body).trim());
+  // memories (operator directive 2026-08-02, card #780): ONE recursive kind. Only TOP-LEVEL
+  // memories (no live memory parent) appear here, TITLE only; `card show <id>`
+  // gives a memory's full body + its child-memory titles — walk titles to leaves.
+  const mems = db.prepare(
+    `SELECT c.id, c.title, c.importance, c.urgency FROM cards c
+     WHERE c.kind = 'memory' AND c.status != 'archived'
+       AND NOT EXISTS (
+         SELECT 1 FROM links l JOIN cards p ON p.id = l.parent
+         WHERE l.child = c.id AND l.kind = 'child'
+           AND p.kind = 'memory' AND p.status != 'archived')
+     ORDER BY COALESCE(c.importance,5) + COALESCE(c.urgency,5) DESC, c.id`).all();
+  parts.push('━━━ memories — top-level titles only; `card show <id>` opens one (full body + child-memory titles; children are hidden here by design) ━━━\n' +
+    (mems.map((m) => '#' + m.id +
+      ((m.importance || m.urgency) ? ' i' + (m.importance ?? '-') + '·u' + (m.urgency ?? '-') : '') +
+      ' ' + m.title).join('\n') || '(no memories)'));
   const tips = cardCli(['tips']).out;
   parts.push('━━━ tips — the wider board (context only; your work is your target cards) ━━━\n' +
     (tips || '(no tips)'));

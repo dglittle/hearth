@@ -6,7 +6,10 @@ PRAGMA journal_mode = WAL;
 
 CREATE TABLE cards (
   id          INTEGER PRIMARY KEY,
-  kind        TEXT NOT NULL,       -- 'mind'|'short-term'|'long-term'|'human'|'{{AGENT_NAME}}'|'erg'|'header'
+  kind        TEXT NOT NULL,       -- 'mind'|'memory'|'human'|'{{AGENT_NAME}}'|'erg'|'header'
+                                   -- ('memory' = ONE recursive kind, replaced short-term/long-term,
+                                   --  operator directive 2026-08-02 #780: top-level titles -> system prompt;
+                                   --  child memories via `card show <parent>`)
   title       TEXT NOT NULL DEFAULT '',  -- one line, OPTIONAL (the operator 2026-07-28); '' = untitled
   body        TEXT NOT NULL DEFAULT '',   -- markdown
   status      TEXT NOT NULL DEFAULT 'draft',

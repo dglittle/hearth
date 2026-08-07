@@ -8,7 +8,7 @@
   :root {
     --bg:#0d1014; --card:#171c22; --card2:#12161b; --ink:#d7dee6; --dim:#8a97a5;
     --line:#2b3540; --sel:#3f96ff;
-    --c-mind:#e05563; --c-short-term:#e8a33d; --c-long-term:#9d8cff; --c-human:#4ea3f0;
+    --c-mind:#e05563; --c-memory:#e8a33d; --c-human:#4ea3f0;
     --c-{{AGENT_NAME}}:#5fc88f; --c-erg:#5fd3a5;
     --c-output:var(--c-{{AGENT_NAME}}); /* legacy alias (limits dials etc.) */
   }
@@ -167,8 +167,7 @@
   .pcard { background:var(--card); border:1px solid var(--line); border-radius:10px;
     padding:9px 12px 11px; margin-bottom:12px; }
   .pcard.k-mind { border-left:4px solid var(--c-mind); }
-  .pcard.k-short-term { border-left:4px solid var(--c-short-term); }
-  .pcard.k-long-term { border-left:4px solid var(--c-long-term); }
+  .pcard.k-memory { border-left:4px solid var(--c-memory); }
   .pcard.k-human { border-left:4px solid var(--c-human); }
   .pcard.k-{{AGENT_NAME}} { border-left:4px solid var(--c-{{AGENT_NAME}}); }
   .pcard.k-erg { border-left:4px solid var(--c-erg); }
@@ -191,8 +190,7 @@
   .node .btns button { background:none; border:none; color:var(--dim); font-size:12px; padding:1px 3px; }
   .node .btns button:hover { color:var(--ink); }
   .node.k-mind { border-left:4px solid var(--c-mind); }
-  .node.k-short-term { border-left:4px solid var(--c-short-term); }
-  .node.k-long-term { border-left:4px solid var(--c-long-term); }
+  .node.k-memory { border-left:4px solid var(--c-memory); }
   .node.k-human { border-left:4px solid var(--c-human); }
   .node.k-{{AGENT_NAME}} { border-left:4px solid var(--c-{{AGENT_NAME}}); }
   .node.k-erg { border-left:4px solid var(--c-erg); }
@@ -336,7 +334,7 @@
   <div class="row">
     <select id="ed-kind">
       <option>human</option><option>{{AGENT_NAME}}</option>
-      <option>short-term</option><option>long-term</option><option>mind</option>
+      <option>memory</option><option>mind</option>
       <option>header</option>
     </select>
     <label>imp <input id="ed-imp" type="number" min="1" max="10"></label>
@@ -570,13 +568,12 @@ function dispPos(c, depth) {
   if (c.x != null && c.y != null) return { x: c.x, y: c.y };
   const hit = posCache.get(c.id); if (hit) return hit;
   /* orphan fallback — quadrant by KIND (operator directive 2026-07-30, #490): a positionless,
-     parentless card must land in its own quadrant, not leak into the interface.
-     human/{{AGENT_NAME}} → interface (lower-right); short-term/mind → live memory
-     (upper-right); long-term → upper-left. */
+     parentless card must land in its own half, not leak into the interface.
+     human/{{AGENT_NAME}} → interface (lower-right); memory/mind → mind-space (the whole
+     top half, operator directive 2026-08-02 #780; default drop = upper-right). */
   const fx = (c.id % 7) * 40, fy = (c.id % 9) * 60;
   let p = { x: 2400 + fx, y: 100 + fy };                                    // human/{{AGENT_NAME}}
-  if (c.kind === 'short-term' || c.kind === 'mind') p = { x: 2400 + fx, y: -700 + fy };
-  else if (c.kind === 'long-term') p = { x: -2600 + fx, y: -700 + fy };
+  if (c.kind === 'memory' || c.kind === 'mind') p = { x: 2400 + fx, y: -700 + fy };
   if ((depth || 0) < 6) {
     let parents = LINKS.filter((l) => l.child === c.id && l.kind === 'child')
       .map((l) => CARDS.get(l.parent)).filter(Boolean);
@@ -584,11 +581,11 @@ function dispPos(c, depth) {
        painted it inside the archive zone looking un-dimmed (operator directive 2026-07-30,
        #513); all parents archived → kind-quadrant fallback above instead */
     if (c.status !== 'archived') parents = parents.filter((pa) => pa.status !== 'archived');
-    /* a memory-kind card (mind/short-term/long-term) never follows a parent INTO the
+    /* a mind-space card (mind/memory) never follows a parent INTO the
        interface quadrant — only human/{{AGENT_NAME}} cards live there (operator report
-       2026-07-31, #81: a long-term card leaked into the lower-right by hanging under its
+       2026-07-31, #81: a memory card leaked into the lower-right by hanging under its
        {{AGENT_NAME}} parent). All parents in the interface → kind-quadrant fallback above. */
-    if (c.kind === 'mind' || c.kind === 'short-term' || c.kind === 'long-term')
+    if (c.kind === 'mind' || c.kind === 'memory')
       parents = parents.filter((pa) => !inInterfaceQ(pa, dispPos(pa, (depth || 0) + 1)));
     if (parents.length) {
       let best = null, by = -Infinity;
@@ -669,8 +666,8 @@ function render() {
     <path d="M0,0 L10,5 L0,10 z" fill="#b58a3d"/></marker></defs>
     <line class="axis" x1="-9000" y1="0" x2="12000" y2="0"/>
     <line class="axis" x1="0" y1="-6000" x2="0" y2="12000"/>
-    <text class="qlbl" x="40" y="-46">live memory</text>
-    <text class="qlbl" x="-160" y="-46" text-anchor="end">long-term</text>
+    <text class="qlbl" x="40" y="-46">mind-space</text>
+    <text class="qlbl" x="-160" y="-46" text-anchor="end">mind-space</text>
     <text class="qlbl" x="40" y="60">interface</text>
     <text class="qlbl" x="-160" y="60" text-anchor="end">archive</text>`;
   for (const l of LINKS) {
@@ -708,7 +705,7 @@ function render() {
     const lk = c.lock_erg != null ? ' 🔒' : '';
     const wu = WARM.get(c.id);                   // ♨ warm session (card #756)
     const wb = wu && wu > Date.now() ? `<span class="hb" title="session warm for ${Math.max(1, Math.round((wu - Date.now()) / 60000))} more min — a reply card (child) ergged now resumes this dialog on the prompt cache">♨</span>` : '';
-    const isChip = c.kind === 'long-term';       // long-term stays a chip; its body lives in the panel
+    const isChip = false;                        // chips retired (operator directive 2026-08-02 #786: memories render full-size like every card)
     const tsTip = 'created ' + fmtTsFull(c.created_at) + ' by ' + c.created_by +
       (c.updated_at !== c.created_at ? ' · updated ' + fmtTsFull(c.updated_at) : '');
     html += `<div class="${cls}" data-id="${c.id}"
