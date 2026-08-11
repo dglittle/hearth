@@ -54,6 +54,15 @@ const TEST_MODE = !!process.env.ERG_CLAUDE_BIN;   // stub binary → skip budget
 const MODEL = 'claude-fable-5';
 const FALLBACK_MODEL = 'claude-opus-5'; // when fable weekly budget is dry (the operator 2026-07-27)
 const TOOLS = 'Bash,Read,Edit,Write,Glob,Grep,WebFetch,WebSearch,TodoWrite';
+// Tools the harness advertises but that CANNOT work in an erg: dontAsk mode
+// auto-denies anything outside TOOLS, and claude -p exits at end of turn so
+// monitors/wakeups/crons/subagent orchestration have nothing to fire into.
+// --disallowedTools strips them from the system prompt so the model never
+// wastes a call on a guaranteed denial (Monitor denial, erg 384 / #1114).
+const NO_TOOLS = 'Agent,Workflow,ReportFindings,ScheduleWakeup,ToolSearch,' +
+  'Monitor,CronCreate,CronDelete,CronList,DesignSync,EnterWorktree,' +
+  'ExitWorktree,NotebookEdit,PushNotification,RemoteTrigger,SendMessage,' +
+  'TaskCreate,TaskGet,TaskList,TaskOutput,TaskStop,TaskUpdate';
 const TIMEOUT_MS = 30 * 60_000;
 
 const log = (m) => { const l = new Date().toISOString() + ' [' + process.pid + '] ' + m; console.log(l); fs.appendFileSync(LOG, l + '\n'); };
@@ -159,6 +168,10 @@ function findResume() {
   for (const r of rows) {
     if (!r.ended_at || Date.now() - Date.parse(r.ended_at) > RESUME_WINDOW_MS) continue;
     if (!fs.existsSync(transcriptPath(r.sid))) continue;
+    // sibling-race guard (erg #273, card #848): if another LIVE erg is already
+    // resumed on this sid, two claude processes would append to one transcript
+    // jsonl — fall through to a fresh erg instead.
+    try { if (db.prepare(`SELECT 1 FROM ergs WHERE sid = ? AND status = 'running'`).get(r.sid)) continue; } catch (_) {}
     let sys = null;
     try { sys = fs.readFileSync(sysPath(r.sid), 'utf8'); } catch (_) { continue; }
     return { sid: r.sid, card: r.card, erg: r.erg, model: r.model || MODEL, sys };
@@ -363,10 +376,13 @@ function runClaude(args, env) {
       '--setting-sources', 'user',            // no project source → no CLAUDE.md
       '--disable-slash-commands',             // no skills
       '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}',
-      '--allowedTools', TOOLS, '--permission-mode', 'dontAsk',
+      '--allowedTools', TOOLS, '--disallowedTools', NO_TOOLS, '--permission-mode', 'dontAsk',
       '--system-prompt', isResume ? resume.sys : sysPrompt,
       ...(isResume ? ['--resume', resume.sid] : ['--session-id', sid])];
     t0 = Date.now(); ran = true;
+    // record sid NOW (not just at finalize) so the board's /hud endpoint can
+    // tail the live transcript while we run (HUD overlay — operator directive 2026-08-06, #988)
+    try { db.prepare('UPDATE ergs SET sid = ? WHERE id = ?').run(sid, ERG); } catch (_) {}
     RESUMED = isResume; SYS_USED = isResume ? resume.sys : sysPrompt;
     log('erg #' + ERG + ' begins ' + sid + (isResume ? ' [♨ RESUME]' : '') +
       ' [cards #' + parents.join(',#') + ' → out #' + outCard + ']' +

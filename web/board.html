@@ -123,6 +123,9 @@
      Deliberately UNscoped: these .txt rules serve card previews AND #panel. */
   .txt p { margin:.35em 0; }
   .txt p:first-child { margin-top:0; }
+  /* pasted images (#1168): small in card previews, big in the side panel */
+  .txt img.mdimg { max-width:100%; max-height:110px; border-radius:4px; display:block; margin:2px 0; }
+  #panel .txt img.mdimg { max-height:55vh; }
   .txt h1, .txt h2, .txt h3, .txt h4 {
     margin:.6em 0 .25em; line-height:1.25; color:var(--ink); }
   .txt h1 { font-size:14.5px; } .txt h2 { font-size:13.5px; }
@@ -196,7 +199,7 @@
   .node.k-erg { border-left:4px solid var(--c-erg); }
   /* header cards (operator directive 2026-07-30, #425): big-font section titles for the board.
      Drag/select like any card, 2×tap edits; no chrome, no body, never expands.
-     Always gold — headers are exempt from the fresh/seen color shift (operator
+     Always gold — headers are exempt from the fresh/seen color shift (the operator
      2026-07-30, #464: the old slate-blue "seen" color looked like stuck
      selection, since first tap = markSeen = gold→blue at the moment of select). */
   .node.k-header { background:none; border:none; padding:2px 8px; overflow:visible; }
@@ -207,19 +210,47 @@
   .node.st-done .ttl { color:var(--dim); }
   .node.arch { opacity:.38; }
   .node.sel { outline:2.5px solid var(--sel); outline-offset:2px; opacity:1; }
-  /* fresh = never touched in THIS browser (operator directive 2026-07-29, #372 + #381): static
-     gold-tinted BACKGROUND + gold border + ✦ new badge, until tapped/expanded/
-     dragged/lassoed. No animation — pulsing is reserved for things that end on
-     their own (live ergs, .pulse below). */
+  /* fresh = never OPENED in THIS browser (operator directive 2026-07-29, #372 + #381;
+     narrowed 2026-08-05, #904): static gold-tinted BACKGROUND + gold border +
+     ✦ new badge, until the card is opened in the side panel. Select/drag/lasso
+     do NOT clear it. No animation — pulsing is reserved for things that end on
+     their own (live ergs — the .hud overlay below carries it). */
   .node.fresh { background:#2c2410; border-color:#e8c15a; }
   .node .nb { color:#e8c15a; font-weight:700; flex-shrink:0; }
   /* ♨ warm session (card #756): this output card's claude session is <1h old —
      erg a human REPLY (child card) and it resumes the dialog on the prompt cache */
   .node .hb, .pcard .hb { color:#e07a4f; flex-shrink:0; cursor:default; }
-  @keyframes pulse {
-    0%,100% { box-shadow:0 0 0 1.5px #5fd3a566, 0 0 8px #5fd3a522; }
-    50%     { box-shadow:0 0 0 2.5px #5fd3a5,   0 0 26px #5fd3a599; } }
-  .node.pulse { animation:pulse 1.6s ease-in-out infinite; }
+  /* ---- jet-HUD overlay (operator directive 2026-08-06, #988): the live claude stream of a
+     running erg, floated z-above its output card — borderless, translucent,
+     green phosphor text with glow, ~70% bigger than the card and centered on
+     it (spill 15%→40%→70% + blur dropped, #995/#999).
+     #1014 (HUD v5): the overlay is now a 2D <canvas>; a shared hidden 1024²
+     WebGL canvas renders animated noise (fbm clouds + ridged electric
+     filaments) into its ALPHA channel, and each frame the hud canvas draws
+     tint+text then destination-in the noise — so the noise IS the overlay's
+     opacity, text included. No pulse animation anymore; the shader breathes.
+     pointer-events:none so the card underneath stays tappable/draggable;
+     it lives inside #world so pan/zoom applies for free. */
+  .hud { position:absolute; z-index:6; pointer-events:none; border-radius:12px; }
+  /* .nogl = WebGL unavailable → v4 DOM fallback (opacity pulse + .hl lines) */
+  @keyframes hudPulse { 0%,100% { opacity:.55; } 50% { opacity:1; } }
+  .hud.nogl { background:rgba(10,26,15,.38); animation:hudPulse 1.8s ease-in-out infinite;
+    padding:7px 10px; overflow:hidden; display:flex; flex-direction:column;
+    justify-content:flex-end; font:9.5px/1.5 ui-monospace,Menlo,monospace;
+    color:#8dffb0; text-shadow:0 0 7px #37ff7c99, 0 0 1px #ccffe0; }
+  /* flex-shrink:0 — else overflowing line boxes get squished vertically and
+     every line shows only its top half (#999b); flex-end clips old lines off
+     the top instead, latest lines stay whole */
+  .hud .hl { white-space:nowrap; overflow:hidden; text-overflow:ellipsis; flex-shrink:0; }
+  .hud .hl.tool { color:#c8ffd9; font-weight:600; }
+  .hud .hl.res { opacity:.5; }
+  .hud .hl.think { font-style:italic; opacity:.65; }
+  .hud .hl.txt { color:#e2ffe9; }
+  /* #1004b: live "thinking now" line — matrixy glyphs accrete while the model
+     generates (client-side ticker, see glyTick) */
+  .hud .hl.gen { color:#a5ffc4; }
+  .hud .hl.gen .gg { color:#57e389; opacity:.85; letter-spacing:1.5px;
+    text-shadow:0 0 9px #37ff7ccc; }
 
   #band { position:fixed; z-index:15; border:1.5px dashed var(--sel); background:#3f96ff14;
     display:none; pointer-events:none; }
@@ -300,7 +331,8 @@
     <span>tap away</span><span>close the panel</span>
     <span>⇧tap</span><span>add to selection</span>
     <span>⇧drag</span><span>lasso</span>
-    <span>drag card</span><span>move it</span>
+    <span>drag card (top half)</span><span>move it</span>
+    <span>drag card (bottom half)</span><span>move it + all descendants</span>
     <span>2×tap</span><span>edit</span>
     <span>✦ (panel)</span><span>mark a card new again</span>
   </div>
@@ -389,6 +421,11 @@ function fmtTsFull(iso) {
 function inlineMd(t) {
   let h = esc(t);
   h = h.replace(/`([^`\n]+)`/g, '<code>$1</code>');
+  /* images (operator directive 2026-08-11, #1168): ![alt](/img/<name>) — pasted, served by our
+     /img route (key appended) — or any absolute https image url. BEFORE links. */
+  h = h.replace(/!\[([^\]]*)\]\((\/img\/[\w.-]+|https?:\/\/[^)\s]+)\)/g,
+    (m, alt, u) => '<img class="mdimg" loading="lazy" alt="' + alt + '" src="' +
+      (u.startsWith('/img/') ? u + '?k=' + K : u) + '">');
   h = h.replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
   h = h.replace(/(^|[\s(>])((?:https?:\/\/)[^\s<>"')]+)/g, '$1<a href="$2" target="_blank" rel="noopener">$2</a>');
   h = h.replace(/\*\*([^*\n]+)\*\*/g, '<b>$1</b>');
@@ -454,17 +491,27 @@ const sel = new Set(), expanded = new Set();
 const saveExp = () => {
   try { localStorage.{{AGENT_NAME}}Exp = JSON.stringify([...expanded]); } catch (_) {} };
 let editorOpen = false, pendingRender = false;
-/* fresh-card tracking (operator directive 2026-07-29, #372): per-browser set of card ids this
-   board has "touched" (tap/expand/drag/lasso/link-open/create). null until the
-   first poll seeds it — first-ever visit marks everything seen (no retro-glow). */
-let seen = null;
-const saveSeen = () => { try { localStorage.{{AGENT_NAME}}Seen = JSON.stringify([...seen]); } catch (_) {} };
+/* fresh-card tracking (operator directive 2026-07-29, #372): set of card ids "touched"
+   (opened in the panel / created). SERVER-SIDE since card #971 so gold ✦ new
+   syncs across machines: /data carries the authoritative set every poll;
+   seen/unsee are /act calls. null until boot initializes it. `pendingSeen`
+   holds in-flight ops so a poll landing mid-POST can't briefly revert them. */
+let seen = null, seenSrv = null, seenSeeded = false;
+const pendingSeen = [];
+function pushSeenOp(op, ids) {
+  const rec = { op, ids };
+  pendingSeen.push(rec);
+  act({ action: op, ids }).finally(() => {
+    const i = pendingSeen.indexOf(rec); if (i >= 0) pendingSeen.splice(i, 1);
+  });
+}
 function markSeen(ids) {
   if (!seen) return false;
-  let changed = false;
-  for (const id of ids) if (!seen.has(id)) { seen.add(id); changed = true; }
-  if (changed) saveSeen();
-  return changed;
+  const add = ids.filter((id) => !seen.has(id));
+  if (!add.length) return false;
+  for (const id of add) seen.add(id);
+  pushSeenOp('seen', add);
+  return true;
 }
 const V = { s: .7, tx: 60, ty: 120 };
 /* pan/zoom persists across refreshes (operator directive 2026-07-29, #278): every apply()
@@ -518,7 +565,7 @@ async function act(p) {
 }
 
 /* ---- poll: full first, then ?since= deltas; reload on ver flip ---- */
-let lastErgsJson = '', lastLinksJson = '', lastWarmJson = '';
+let lastErgsJson = '', lastLinksJson = '', lastWarmJson = '', lastSeenJson = '';
 async function poll() {
   let d;
   try {
@@ -538,8 +585,20 @@ async function poll() {
      server's delta overlap ⇒ an id we've never seen. Refetch full once. */
   if (!d.full && d.ids.some((id) => !CARDS.has(id))) { since = ''; return poll(); }
   const ej = JSON.stringify(d.ergs), lj = JSON.stringify(d.links), wj = JSON.stringify(d.warm || []);
-  const changed = d.cards.length || removed || ej !== lastErgsJson || lj !== lastLinksJson || wj !== lastWarmJson;
+  const sj = JSON.stringify(d.seen || []);
+  const changed = d.cards.length || removed || ej !== lastErgsJson || lj !== lastLinksJson ||
+    wj !== lastWarmJson || sj !== lastSeenJson;
   LINKS = d.links; ERGS = d.ergs; lastErgsJson = ej; lastLinksJson = lj; lastWarmJson = wj;
+  lastSeenJson = sj;
+  // server-side seen (#971): adopt the authoritative set, re-applying any
+  // in-flight local ops so a poll can't briefly re-gold a just-opened card
+  seenSrv = d.seen || null; seenSeeded = !!d.seenSeeded;
+  if (seen && seenSrv) {
+    const s = new Set(seenSrv);
+    for (const rec of pendingSeen) for (const id of rec.ids)
+      rec.op === 'seen' ? s.add(id) : s.delete(id);
+    seen = s;
+  }
   WARM = new Map((d.warm || []).map((w) => [w.card, w.until]));
   // erg finished while we watched → capture fresh limit dials
   // ("data from the most recent erg" — the probe rides the erg's tail)
@@ -585,10 +644,11 @@ function slotBelow(x, y, skipId) {
 function dispPos(c, depth) {
   if (c.x != null && c.y != null) return { x: c.x, y: c.y };
   const hit = posCache.get(c.id); if (hit) return hit;
-  /* orphan fallback — quadrant by KIND (operator directive 2026-07-30, #490): a positionless,
-     parentless card must land in its own half, not leak into the interface.
-     human/{{AGENT_NAME}} → interface (lower-right); memory/mind → mind-space (the whole
-     top half, operator directive 2026-08-02 #780; default drop = upper-right). */
+  /* orphan fallback — half by KIND (operator directive 2026-07-30, #490): a positionless,
+     parentless card must land in its own half. human/{{AGENT_NAME}} → interface (the
+     whole lower half, operator directive 2026-08-05 #960; default drop = lower-right);
+     memory/mind → mind-space (the whole top half, operator directive 2026-08-02 #780;
+     default drop = upper-right). */
   const fx = (c.id % 7) * 40, fy = (c.id % 9) * 60;
   let p = { x: 2400 + fx, y: 100 + fy };                                    // human/{{AGENT_NAME}}
   if (c.kind === 'memory' || c.kind === 'mind') p = { x: 2400 + fx, y: -700 + fy };
@@ -619,13 +679,16 @@ function dispPos(c, depth) {
   posCache.set(c.id, p);
   return p;
 }
-/* archived cards are ALWAYS visible in their quadrant (operator directive 2026-07-28, #256b) */
-const visible = () => true;
+/* archived cards are HIDDEN (operator directive 2026-08-05, #960 — supersedes #256b
+   "always visible"). They stay in the db/data; find-by-number still opens
+   one in the side panel, and un-archive works on it from there. */
+const visible = (c) => c.status !== 'archived';
 
-/* interface quadrant = lower-right (x>0, y>0 by card center). No arrows may
-   cross its boundary: edges between the interaction area and ANY other
-   quadrant are hidden (operator directive 2026-07-30, #431). */
-const inInterfaceQ = (c, p) => p.x + cw(c) / 2 > 0 && p.y + ch(c) / 2 > 0;
+/* interface area = the WHOLE lower half (y>0 by card center; operator directive 2026-08-05,
+   #960 — was lower-right only; the old lower-left archive zone is gone since
+   archived cards no longer render). No arrows may cross its boundary: edges
+   between the interface and the mind-space half are hidden (operator directive 2026-07-30, #431). */
+const inInterfaceQ = (c, p) => p.y + ch(c) / 2 > 0;
 
 /* edge geometry — shared by render() and the live drag update (operator directive 2026-07-29, #313) */
 function edgeD(kind, a, b, pa, pb) {
@@ -652,17 +715,8 @@ function plinksHtml(id) {
   ).join('') + '</div>';
 }
 
-/* pulsing = being worked right now: locked by / output-card of a live running erg */
-function inFlight() {
-  const hot = new Set(), live = new Set();
-  for (const e of ERGS) if (e.status === 'running' && e.alive) {
-    live.add(e.id);
-    if (e.info_card) hot.add(e.info_card);
-    if (e.target_card) hot.add(e.target_card);
-  }
-  for (const c of CARDS.values()) if (c.lock_erg != null && live.has(c.lock_erg)) hot.add(c.id);
-  return hot;
-}
+/* pulsing = being worked right now — carried by the jet-HUD overlay itself
+   (#999: node border pulse retired, it was hidden under the HUD) */
 
 /* ---- render (full rebuild; deferred while fingers down or editor open) ---- */
 function render() {
@@ -671,7 +725,6 @@ function render() {
   for (const id of [...expanded]) if (!sel.has(id)) expanded.delete(id);  // deselected → unexpand
   saveExp();
   posCache = new Map();
-  const hot = inFlight();
   const cards = [...CARDS.values()].filter(visible);
   const pos = new Map();
   for (const c of cards) pos.set(c.id, dispPos(c));
@@ -689,11 +742,10 @@ function render() {
     <text class="qlbl" x="40" y="-46">mind-space</text>
     <text class="qlbl" x="-160" y="-46" text-anchor="end">mind-space</text>
     <text class="qlbl" x="40" y="60">interface</text>
-    <text class="qlbl" x="-160" y="60" text-anchor="end">archive</text>`;
+    <text class="qlbl" x="-160" y="60" text-anchor="end">interface</text>`;
   for (const l of LINKS) {
     const a = CARDS.get(l.parent), b = CARDS.get(l.child);
-    if (!a || !b || !visible(a) || !visible(b)) continue;
-    if ((a.status === 'archived') !== (b.status === 'archived')) continue;  // no edges across the archive boundary
+    if (!a || !b || !visible(a) || !visible(b)) continue;   // (also drops all edges touching archived cards)
     const pa = pos.get(a.id), pb = pos.get(b.id);
     if (inInterfaceQ(a, pa) !== inInterfaceQ(b, pb)) continue;  // no arrows in/out of the interface quadrant (#431)
     const d = edgeD(l.kind, a, b, pa, pb);
@@ -714,7 +766,7 @@ function render() {
     const fresh = seen && !seen.has(c.id);
     const cls = ['node', 'k-' + c.kind, 'st-' + c.status,
       c.status === 'archived' ? 'arch' : '', sel.has(c.id) ? 'sel' : '',
-      hot.has(c.id) ? 'pulse' : '', fresh ? 'fresh' : '',
+      fresh ? 'fresh' : '',
       expanded.has(c.id) ? 'open' : ''].join(' ');   // open = showing in the side panel (#51)
     if (c.kind === 'header') {           // big-font section title, no chrome (#425)
       html += `<div class="${cls}" data-id="${c.id}" style="left:${p.x}px;top:${p.y}px">
@@ -737,10 +789,216 @@ function render() {
       (c.url ? `<button class="b-url" data-url="${esc(c.url)}" title="open link">↗</button>` : '') +
       `</div></div>`;
   }
+  /* jet-HUD overlays (#988, resized #995/#999): one per running erg, floated over
+     its output card — 70% bigger, centered. Painted last = above every node (z:6 too). */
+  for (const e of ERGS) {
+    if (!(e.status === 'running' && e.alive && e.info_card)) continue;
+    const c = CARDS.get(e.info_card);
+    if (!c || !visible(c)) continue;
+    const p = pos.get(c.id) || dispPos(c);
+    const tag = NOISE ? 'canvas' : 'div';        // v5: canvas + shader mask (#1014)
+    html += `<${tag} class="hud${NOISE ? '' : ' nogl'}" data-erg="${e.id}" data-card="${c.id}"
+      style="left:${p.x - cw(c) * .35}px;top:${p.y - ch(c) * .35}px;width:${cw(c) * 1.7}px;height:${ch(c) * 1.7}px"></${tag}>`;
+  }
   world.innerHTML = html;
+  paintHuds();
   renderPanel();
   updateBars();
 }
+
+/* ---- jet-HUD stream (#988): poll /hud while any erg runs; paint the tails
+   into the overlays. Separate 2.5s poll — the stream moves faster than the
+   5s card poll, and the payload is a few hundred bytes per running erg. ---- */
+let HUDS = new Map(), hudBusy = false;             // erg id -> {lines, gen, tt}
+async function pollHud() {
+  const on = ERGS.some((e) => e.status === 'running' && e.alive && e.info_card);
+  if (!on) { if (HUDS.size) { HUDS = new Map(); GLY.clear(); HUDSTATE.clear(); paintHuds(); } return; }
+  if (hudBusy) return;
+  hudBusy = true;
+  try {
+    const r = await fetch('/hud?k=' + K);
+    const d = await r.json();
+    if (d.ok) { HUDS = new Map((d.huds || []).map((h) => [h.erg, h])); paintHuds(); }
+  } catch (_) {}
+  hudBusy = false;
+}
+/* #1004b: while the model is generating (server says gen — the transcript's
+   last entry is a tool_result, so it's thinking/writing right now) the HUD
+   shows a live line: cumulative thinking-token estimate + slowly accreting
+   matrixy glyphs. Glyphs grow one per tick, cap and scroll, clear when the
+   next real transcript line lands. */
+const GLY = new Map();                             // erg id -> glyph string
+const GLYCH = 'ｦｱｳｴｵｶｷｹｺｻｼｽｾﾀﾂﾃﾅﾆﾇﾈﾊﾋﾎﾏﾐﾑﾒﾓﾔﾕﾗﾘﾜ∴∵⋮⌁∮≋⚛∇λΣΞφψ϶';
+function glyTick() {
+  let any = false;
+  for (const [id, h] of HUDS) {
+    if (h && h.gen) {
+      let g = (GLY.get(id) || '') + GLYCH[Math.floor(Math.random() * GLYCH.length)];
+      if (g.length > 22) g = g.slice(-22);
+      GLY.set(id, g); any = true;
+    } else GLY.delete(id);
+  }
+  if (any) paintHuds();
+}
+setInterval(glyTick, 700);
+/* ---- HUD v5 (operator directive 2026-08-07, #1014): WebGL noise as the overlay's opacity.
+   One hidden 1024×1024 canvas runs a fragment shader — domain-warped fbm
+   clouds + a ridged "electric filament" term — writing the field into ALPHA.
+   Each .hud is a 2D canvas: per frame draw tint + text layer, then
+   destination-in drawImage(noise) → the noise literally becomes the div's
+   opacity (text included). Canvas→canvas drawImage stays on the GPU — no
+   readback, no per-frame encode. Alpha floor .25 keeps text legible. ---- */
+const NOISE = (() => {
+  try {
+    const cnv = document.createElement('canvas'); cnv.width = cnv.height = 1024;
+    const gl = cnv.getContext('webgl', { alpha: true, antialias: false, depth: false });
+    if (!gl) return null;
+    const vs = 'attribute vec2 a;varying vec2 v;void main(){v=a*.5+.5;gl_Position=vec4(a,0.,1.);}';
+    // v6 (#1022): per-CHARACTER opacity. The canvas is rendered per-hud with
+    // uniforms describing that hud's text cell grid (in hud backing px):
+    //   res  = hud size · cell = (charW, lineH) · org = grid origin · off = per-erg world offset
+    // Each fragment converts to hud pixel space (y flipped: GL is bottom-up,
+    // canvas is top-down), SNAPS to its cell's center, and evaluates the noise
+    // there — so every pixel of a character cell shares one opacity, sampled
+    // at the cell center. cell.x <= 0 → no snap = the smooth v5.1 look (backup).
+    const fs = 'precision highp float;varying vec2 v;uniform float t;' +
+      'uniform vec2 res,cell,org,off;' +
+      'float h(vec2 p){return fract(sin(dot(p,vec2(127.1,311.7)))*43758.5453);}' +
+      'float n(vec2 p){vec2 i=floor(p),f=fract(p);f=f*f*(3.-2.*f);' +
+      'return mix(mix(h(i),h(i+vec2(1.,0.)),f.x),mix(h(i+vec2(0.,1.)),h(i+vec2(1.,1.)),f.x),f.y);}' +
+      'float fb(vec2 p){float a=.5,s=0.;for(int i=0;i<4;i++){s+=a*n(p);p*=2.03;a*=.5;}return s;}' +
+      // swirly field (v5.1): counter-rotating stirs + field-phased churn
+      'void main(){' +
+      'vec2 hp=vec2(v.x,1.-v.y)*res;' +                                     // hud px, top-down
+      'vec2 sp=cell.x>0.?org+(floor((hp-org)/cell)+.5)*cell:hp;' +          // snap to char-cell center
+      'vec2 p=sp/res.y*3.+off;' +                                           // isotropic noise coords
+      'vec2 r1=.9*vec2(cos(t*.33),sin(t*.33));' +                           // stir one way…
+      'vec2 r2=.7*vec2(cos(2.1-t*.47),sin(2.1-t*.47));' +                   // …counter-stir the other
+      'vec2 w=vec2(fb(p+r1),fb(p+5.2+r2));' +
+      'w+=.4*vec2(cos(t*.6+w.y*6.283),sin(t*.6+w.x*6.283));' +              // field-phased churn → local swirls
+      'float c=fb(p+2.2*w);' +                                              // cloudy body
+      'float b=1.-abs(2.*fb(p*1.7+w*2.8+r2*1.5)-1.);b=pow(b,6.);' +         // electric filaments
+      'float o=clamp(.25+.75*clamp(c*.9+b*1.1,0.,1.),0.,1.);' +
+      'gl_FragColor=vec4(o);}';                                             // premult white, alpha = field
+    const mk = (ty, src) => { const s = gl.createShader(ty); gl.shaderSource(s, src); gl.compileShader(s);
+      if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s)); return s; };
+    const pr = gl.createProgram();
+    gl.attachShader(pr, mk(gl.VERTEX_SHADER, vs)); gl.attachShader(pr, mk(gl.FRAGMENT_SHADER, fs));
+    gl.linkProgram(pr);
+    if (!gl.getProgramParameter(pr, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(pr));
+    gl.useProgram(pr);
+    gl.bindBuffer(gl.ARRAY_BUFFER, gl.createBuffer());
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 3, -1, -1, 3]), gl.STATIC_DRAW);
+    const loc = gl.getAttribLocation(pr, 'a');
+    gl.enableVertexAttribArray(loc); gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
+    const u = {};
+    for (const nm of ['t', 'res', 'cell', 'org', 'off']) u[nm] = gl.getUniformLocation(pr, nm);
+    gl.viewport(0, 0, 1024, 1024);
+    return { cnv, draw(t, res, cell, org, off) {
+      gl.uniform1f(u.t, t);
+      gl.uniform2f(u.res, res[0], res[1]); gl.uniform2f(u.cell, cell[0], cell[1]);
+      gl.uniform2f(u.org, org[0], org[1]); gl.uniform2f(u.off, off[0], off[1]);
+      gl.drawArrays(gl.TRIANGLES, 0, 3); } };
+  } catch (_) { return null; }
+})();
+const HUD_QUANT = true;   // false → smooth v5.1 field (no char-cell snap); file backup: backup-board-v5.1-smooth.html
+const RES = Math.min(3, (devicePixelRatio || 1) * 1.5);   // text backing-store scale
+const HUDSTATE = new Map();                                // erg id -> {key, cnv} text layer
+function hudFont(k) {
+  return (k === 'tool' ? '600 ' : k === 'think' ? 'italic ' : '') +
+    (9.5 * RES) + 'px ui-monospace, Menlo, monospace';
+}
+const HUDLH = 9.5 * 1.5 * RES;                             // row pitch (backing px)
+const CHW = (() => {                                       // char advance — ONE source of truth
+  const c = document.createElement('canvas').getContext('2d');
+  c.font = hudFont(''); return c.measureText('M').width || 6;
+})();                                                      // shader grid must match fillText grid
+const HUDCOL = { tool: '#c8ffd9', res: 'rgba(141,255,176,.5)', think: 'rgba(141,255,176,.65)',
+  txt: '#e2ffe9', gen: '#a5ffc4' };
+function drawHudContent(rows, cssW, cssH) {                // rasterize the .hl lines, bottom-aligned
+  const cnv = document.createElement('canvas');
+  cnv.width = Math.max(1, cssW * RES | 0); cnv.height = Math.max(1, cssH * RES | 0);
+  const x = cnv.getContext('2d');
+  const px = 10 * RES, py = 7 * RES, lh = HUDLH;
+  x.shadowColor = '#37ff7c'; x.shadowBlur = 7 * RES;       // phosphor glow
+  x.font = hudFont('');
+  const maxC = Math.max(4, Math.floor((cnv.width - 2 * px) / CHW));
+  let y = cnv.height - py - 3 * RES;                       // baseline of the newest row
+  for (let i = rows.length - 1; i >= 0 && y > -lh; i--, y -= lh) {
+    const r = rows[i];
+    x.font = hudFont(r.k);
+    x.fillStyle = HUDCOL[r.k] || '#8dffb0';
+    let t = r.t;
+    if (!r.g && t.length > maxC) t = t.slice(0, maxC - 1) + '…';
+    x.fillText(t, px, y);
+    if (r.g) { const wp = x.measureText(t).width;          // matrixy glyphs, own color
+      x.fillStyle = '#57e389'; x.fillText(r.g, px + wp, y); }
+  }
+  return cnv;
+}
+let hudRaf = 0, hudFrame = 0;
+function hudLoopStart() { if (NOISE && !hudRaf) hudRaf = requestAnimationFrame(hudLoop); }
+function hudLoop(ts) {
+  hudRaf = 0;
+  const els = world.querySelectorAll('canvas.hud');
+  if (!els.length) return;                                 // self-stop; paintHuds restarts
+  hudRaf = requestAnimationFrame(hudLoop);
+  if (hudFrame++ & 1) return;                              // ~30fps is plenty for clouds
+  for (const el of els) {
+    const id = +el.dataset.erg;
+    const w = el.clientWidth, h = el.clientHeight;
+    if (!w || !h) continue;
+    const bw = w * RES | 0, bh = h * RES | 0;
+    if (el.width !== bw || el.height !== bh) { el.width = bw; el.height = bh; }
+    const x = el._x || (el._x = el.getContext('2d'));
+    x.globalCompositeOperation = 'source-over';
+    x.clearRect(0, 0, bw, bh);
+    x.fillStyle = 'rgba(10,26,15,.55)';                    // tint, then text
+    x.fillRect(0, 0, bw, bh);
+    const st = HUDSTATE.get(id);
+    if (st && st.cnv) x.drawImage(st.cnv, 0, 0, bw, bh);
+    // v6 (#1022): render the noise PER HUD with this hud's char grid — cell
+    // boundaries: x = 10·RES + i·CHW (fillText origin), y = bh − 7.5·RES − k·lh
+    // (just below each baseline, descent-deep). Snapped field → one opacity
+    // per character cell; then the full canvas maps 1:1 onto the hud rect.
+    NOISE.draw(ts / 1000, [bw, bh],
+      HUD_QUANT ? [CHW, HUDLH] : [0, 0],
+      [10 * RES, bh - 7.5 * RES],
+      [(id * .618) % 7, (id * 1.417) % 7]);                // per-erg offset = distinct weather
+    x.globalCompositeOperation = 'destination-in';         // noise → alpha of everything above
+    x.drawImage(NOISE.cnv, 0, 0, 1024, 1024, 0, 0, bw, bh);
+  }
+}
+function hudRows(id) {
+  const hd = HUDS.get(id) || {};
+  const ls = hd.lines || [];
+  const rows = ls.length ? ls.map((l) => ({ k: l.k, t: l.t }))
+    : [{ k: 'think', t: '⚙ spinning up…' }];
+  if (hd.gen) rows.push({ k: 'gen',
+    t: `≋ thinking${hd.tt ? ' · ~' + hd.tt + 'tok so far' : ''} `, g: GLY.get(id) || '' });
+  return rows;
+}
+function paintHuds() {
+  try { paintHuds_(); } catch (_) {}   // never let HUD painting break render()
+}
+function paintHuds_() {
+  for (const el of world.querySelectorAll('.hud')) {
+    const id = +el.dataset.erg;
+    const rows = hudRows(id);
+    if (!NOISE) {                                          // v4 DOM fallback
+      const h = rows.map((r) => `<div class="hl ${r.k}">${esc(r.t)}${r.g ? `<span class="gg">${esc(r.g)}</span>` : ''}</div>`).join('');
+      if (el._h !== h) { el.innerHTML = h; el._h = h; }
+      continue;
+    }
+    const w = el.clientWidth, h = el.clientHeight;
+    const key = w + 'x' + h + '|' + JSON.stringify(rows);
+    let st = HUDSTATE.get(id);
+    if (!st) { if (HUDSTATE.size > 24) HUDSTATE.clear(); HUDSTATE.set(id, st = {}); }
+    if (st.key !== key) { st.key = key; st.cnv = drawHudContent(rows, w, h); }
+  }
+  hudLoopStart();
+}
+setInterval(pollHud, 2500);
 
 /* fast path for taps (operator directive 2026-07-31, #681): opening/closing the side panel
    only changes sel/expanded — no card data or geometry moved. A full render()
@@ -820,7 +1078,19 @@ $('panel').addEventListener('click', (e) => {
   if (b.classList.contains('b-unlink')) {                 // break a parent/ref link (#408)
     const par = +b.dataset.p, chd = +b.dataset.c;
     if (!confirm('break link #' + par + ' → #' + chd + '?')) return;
-    act({ action: 'unlink', parent: par, child: chd })
+    /* unlink-anchor fix (#544, extended to the panel erg 248 — #777 "vanished"
+       because this handler lacked it): a positionless child renders relative to
+       its parents; cutting a child-link could drop its only anchor and teleport
+       it to the orphan fallback. Persist the rendered spot FIRST, then cut. */
+    const cc = CARDS.get(chd);
+    const anchored = cc && (cc.x == null || cc.y == null) &&
+      LINKS.some((l) => l.parent === par && l.child === chd && l.kind === 'child');
+    const pre = anchored
+      ? (() => { const p = dispPos(cc);
+                 return act({ action: 'edit', id: chd, x: p.x, y: p.y })
+                   .then((r) => { if (r) { cc.x = p.x; cc.y = p.y; } return r; }); })()
+      : Promise.resolve(true);
+    pre.then((ok) => ok && act({ action: 'unlink', parent: par, child: chd }))
       .then((r) => { if (r) { toast('✂ link #' + par + ' → #' + chd + ' broken'); poll(); } });
     return;
   }
@@ -831,14 +1101,13 @@ $('panel').addEventListener('click', (e) => {
     case 'find': if (c) { pushBack(); centerOn(c); } break;
     case 'edit': if (c) openEditor(c); break;
     case 'close': expanded.delete(id); saveExp(); uiSync(); break;
-    /* mark as new again (operator directive 2026-08-01) — gmail-style "mark
-       unread": drop the id from the seen-set so the card gets its gold
-       fresh-glow + ✦ badge back. Close AND deselect it, else the very next
-       drag/lasso on the still-selected card would re-mark it seen. Full
-       render(), not uiSync(): the fast path only ever REMOVES the fresh
-       class. */
+    /* mark as new again (operator directive 2026-08-01) — gmail-style "mark unread":
+       drop the id from the seen-set so the card gets its gold fresh-glow +
+       ✦ badge back. Close AND deselect it, else the very next drag/lasso on
+       the still-selected card would re-mark it seen. Full render(), not
+       uiSync(): the fast path only ever REMOVES the fresh class. */
     case 'new':
-      if (seen) { seen.delete(id); saveSeen(); }
+      if (seen) { seen.delete(id); pushSeenOp('unsee', [id]); }
       expanded.delete(id); saveExp(); sel.delete(id);
       render();
       toast('✦ #' + id + ' is new again');
@@ -889,6 +1158,8 @@ let moved = 0, pinch0 = null, downTarget = null, down0 = null;
 let mode = null;                       // 'pan' | 'band' | 'card'
 let dragIds = null, dragOrig = null;   // card-drag state
 let dragPaths = null;                  // svg paths touching dragged cards (#313)
+let downDeep = false;                  // grab was on the card's BOTTOM half (operator directive 2026-08-11, #1271)
+let dragFree = null;                   // deep-dragged positionless followers — never baked on commit
 let lastTap = { id: null, t: 0 };
 
 vp.addEventListener('pointerdown', (e) => {
@@ -900,6 +1171,10 @@ vp.addEventListener('pointerdown', (e) => {
     downTarget = e.target; down0 = { x: e.clientX, y: e.clientY };
     const node = e.target.closest && e.target.closest('.node');
     mode = node ? 'card' : (e.shiftKey ? 'band' : 'pan');
+    /* bottom-half grab = deep drag: card + all descendants (operator directive 2026-08-11, #1271) */
+    downDeep = false;
+    if (node) { const r = node.getBoundingClientRect();
+      downDeep = e.clientY > r.top + r.height / 2; }
     if (mode === 'band') { const b = $('band'); b.style.display = 'block';
       Object.assign(b.style, { left: down0.x + 'px', top: down0.y + 'px', width: '0px', height: '0px' }); }
   }
@@ -927,6 +1202,16 @@ vp.addEventListener('pointermove', (e) => {
     Object.assign(b.style, {
       left: Math.min(down0.x, e.clientX) + 'px', top: Math.min(down0.y, e.clientY) + 'px',
       width: Math.abs(e.clientX - down0.x) + 'px', height: Math.abs(e.clientY - down0.y) + 'px' });
+    /* live highlight while the rectangle grows (#958) — preview only, sel
+       commits at pointerup; class toggles are cheap, no rebuild */
+    const x1 = (Math.min(down0.x, e.clientX) - V.tx) / V.s, x2 = (Math.max(down0.x, e.clientX) - V.tx) / V.s;
+    const y1 = (Math.min(down0.y, e.clientY) - V.ty) / V.s, y2 = (Math.max(down0.y, e.clientY) - V.ty) / V.s;
+    for (const el of world.querySelectorAll('.node')) {
+      const c = CARDS.get(+el.dataset.id); if (!c) continue;
+      const p = dispPos(c);
+      const inBand = p.x < x2 && p.x + cw(c) > x1 && p.y < y2 && p.y + ch(c) > y1;
+      el.classList.toggle('sel', inBand || sel.has(c.id));
+    }
     return;
   }
   if (mode === 'card' && moved >= 7) {
@@ -935,7 +1220,28 @@ vp.addEventListener('pointermove', (e) => {
       const id = +node.dataset.id;
       if (!sel.has(id)) { sel.clear(); sel.add(id); }
       dragIds = [...sel];
-      markSeen(dragIds);                               // dragging = touched (#372)
+      /* deep drag (operator directive 2026-08-11, #1271): bottom-half grab pulls every
+         descendant (child-links, recursive) along. Positionless descendants
+         (x/y null) ride along visually but go in dragFree — they are never
+         baked on commit, since they already re-derive under their parent. */
+      dragFree = null;
+      if (downDeep) {
+        const set = new Set(dragIds), queue = [...dragIds];
+        while (queue.length) {
+          const pid = queue.shift();
+          for (const l of LINKS)
+            if (l.kind === 'child' && l.parent === pid && !set.has(l.child)) {
+              const kid = CARDS.get(l.child);
+              if (kid && visible(kid)) { set.add(l.child); queue.push(l.child); }
+            }
+        }
+        dragFree = new Set([...set].filter((cid) => {
+          const c = CARDS.get(cid);
+          return !sel.has(cid) && (c.x == null || c.y == null);
+        }));
+        dragIds = [...set];
+      }
+      // no markSeen: drag doesn't open the panel, so it keeps ✦ new (#904)
       dragOrig = new Map(dragIds.map((cid) => {
         const c = CARDS.get(cid); const dp = dispPos(c);
         return [cid, { x: dp.x, y: dp.y }];
@@ -953,6 +1259,10 @@ vp.addEventListener('pointermove', (e) => {
       const o = dragOrig.get(cid);
       const el = world.querySelector(`.node[data-id="${cid}"]`);
       if (el) { el.style.left = (o.x + dxw) + 'px'; el.style.top = (o.y + dyw) + 'px'; }
+      const hel = world.querySelector(`.hud[data-card="${cid}"]`);   // HUD rides along (#988)
+      if (hel) { const hc = CARDS.get(cid);
+        hel.style.left = (o.x + dxw - cw(hc) * .35) + 'px';
+        hel.style.top = (o.y + dyw - ch(hc) * .35) + 'px'; }
     }
     // arrows follow the cards live during the drag (operator directive 2026-07-29, #313)
     if (dragPaths) {
@@ -989,8 +1299,10 @@ vp.addEventListener('pointerup', async (e) => {
       const p = dispPos(c);
       if (p.x < x2 && p.x + cw(c) > x1 && p.y < y2 && p.y + ch(c) > y1) sel.add(c.id);
     }
-    markSeen([...sel]);                                // lasso = touched (#372)
-    render(); return;
+    // no markSeen: lasso doesn't open the panel, so it keeps ✦ new (#904)
+    /* uiSync, not render (#958): lasso only changes `sel` — the full rebuild
+       (innerHTML + md() over every body) cost ~400ms of highlight lag */
+    uiSync(); return;
   }
 
   if (wasDrag && ptrs.size === 0) {                    // commit card drag
@@ -998,10 +1310,13 @@ vp.addEventListener('pointerup', async (e) => {
     const rel = [], abs = [];
     for (const cid of dragIds) {
       const c = CARDS.get(cid); if (!c) continue;
+      /* deep-dragged positionless follower: skip — it re-derives under its
+         (now moved) parent on render, keeping auto-follow semantics (#1271) */
+      if (dragFree && dragFree.has(cid)) continue;
       if (c.x == null || c.y == null) abs.push(cid); else rel.push(cid);
       const o = dragOrig.get(cid); c.x = o.x + dxw; c.y = o.y + dyw;   // local write-through
     }
-    dragIds = null; dragOrig = null; dragPaths = null;
+    dragIds = null; dragOrig = null; dragPaths = null; dragFree = null;
     if (Math.abs(dxw) + Math.abs(dyw) > .5) {
       if (rel.length) await act({ action: 'move', ids: rel, dx: dxw, dy: dyw });
       for (const cid of abs) {
@@ -1015,7 +1330,9 @@ vp.addEventListener('pointerup', async (e) => {
   if (moved < 7 && t && ptrs.size === 0) tap(t, e);
 });
 vp.addEventListener('pointercancel', (e) => { ptrs.delete(e.pointerId); pinch0 = null;
-  dragIds = null; dragOrig = null; dragPaths = null; $('band').style.display = 'none'; });
+  dragIds = null; dragOrig = null; dragPaths = null; dragFree = null; $('band').style.display = 'none';
+  if (!ptrs.size) uiSync();  // clear any live band-preview highlights (#958)
+});
 
 vp.addEventListener('wheel', (e) => {
   e.preventDefault();
@@ -1047,8 +1364,9 @@ function tap(t, e) {
     return;
   }
   const id = +node.dataset.id;
-  const wasFresh = markSeen([id]);                     // any tap on a card = touched (#372)
-  if (t.classList.contains('b-url')) { openTab(t.dataset.url); if (wasFresh) uiSync(); return; }
+  /* seen is no longer marked on every tap (#372) — only OPENING a card in the
+     side panel clears ✦ new (operator directive 2026-08-05, #904); see the expanded.add sites. */
+  if (t.classList.contains('b-url')) { openTab(t.dataset.url); return; }
   if (t.classList.contains('b-unlink')) {              // break a parent/ref link (#408)
     const par = +t.dataset.p, chd = +t.dataset.c;
     if (!confirm('break link #' + par + ' → #' + chd + '?')) return;
@@ -1074,6 +1392,7 @@ function tap(t, e) {
       expanded.add(id);                                // (render closes any card
       if (!(e.shiftKey || e.ctrlKey || e.metaKey)) sel.clear();  // not in sel)
       sel.add(id);
+      markSeen([id]);                                  // opened in panel → seen (#904)
     }
     uiSync();                                          // fast path: classes + panel only (#681)
     // no revealCard here: tapping a card must NOT adjust the pan (operator directive 2026-07-31, #685)
@@ -1089,7 +1408,7 @@ function tap(t, e) {
   if (meta) { sel.has(id) ? sel.delete(id) : sel.add(id); }
   else { sel.clear(); sel.add(id);                   // tap OPENS (operator directive 2026-07-29, #374)
     const cc = CARDS.get(id);                        // …except headers: nothing to open (#425)
-    if (!cc || cc.kind !== 'header') { expanded.add(id); saveExp(); } }
+    if (!cc || cc.kind !== 'header') { expanded.add(id); saveExp(); markSeen([id]); } }
   uiSync();                                          // fast path: classes + panel only (#681)
   // no revealCard here: tapping a card must NOT adjust the pan (operator directive 2026-07-31, #685)
 }
@@ -1104,7 +1423,7 @@ function openEditor(c, parents) {
      card's kind isn't in the list (e.g. 'erg'), add it so the select is honest */
   if (c && ![...$('ed-kind').options].some((o) => o.value === c.kind))
     $('ed-kind').add(new Option(c.kind));
-  $('ed-kind').value = c ? c.kind : 'human';   // the operator's UI → their cards default to human
+  $('ed-kind').value = c ? c.kind : 'human';   // the operator's UI → his cards default to human
   $('ed-title').value = c ? c.title : '';
   $('ed-body').value = c ? c.body : '';
   $('ed-url').value = (c && c.url) || '';
@@ -1131,6 +1450,30 @@ for (const fid of ['ed-title', 'ed-body', 'ed-url', 'ed-imp', 'ed-urg', 'ed-kind
   $(fid).addEventListener('input', saveEd);
   $(fid).addEventListener('change', saveEd);
 }
+/* paste an image into the body editor (operator directive 2026-08-11, #1168): uploads it to the
+   server (→ imgs/<name> on disk, readable by {{AGENT_NAME}}), inserts ![img](/img/<name>)
+   at the cursor; the board renders it inline (small in preview, big in panel). */
+$('ed-body').addEventListener('paste', (e) => {
+  const items = [...(e.clipboardData?.items || [])].filter((i) => i.type.startsWith('image/'));
+  if (!items.length) return;
+  e.preventDefault();
+  for (const it of items) {
+    const blob = it.getAsFile(); if (!blob) continue;
+    toast('⬆ uploading image…');
+    fetch('/img?k=' + K, { method: 'POST', headers: { 'Content-Type': blob.type }, body: blob })
+      .then((r) => r.json())
+      .then((d) => {
+        if (!d.ok) { toast('⚠ image: ' + (d.error || 'upload failed')); return; }
+        const ta = $('ed-body'), s = ta.selectionStart, en = ta.selectionEnd;
+        const ins = (s > 0 && ta.value[s - 1] !== '\n' ? '\n' : '') + d.md + '\n';
+        ta.value = ta.value.slice(0, s) + ins + ta.value.slice(en);
+        ta.selectionStart = ta.selectionEnd = s + ins.length;
+        toast('🖼 saved ' + d.file);
+        saveEd();
+      })
+      .catch((e2) => toast('⚠ image: ' + e2.message));
+  }
+});
 function restoreEditor() {
   let s; try { s = JSON.parse(localStorage.{{AGENT_NAME}}Ed || 'null'); } catch (_) { return; }
   if (!s) return;
@@ -1221,7 +1564,29 @@ $('a-stack').onclick = async () => {
 async function setStatus(pick, st, label) {
   let n = 0;   // archive touches ONLY the picked cards (operator directive 2026-07-29, #299 — no ancestor pull)
   let closed = false;
-  for (const c of selCards()) if (pick(c)) {
+  const picked = selCards().filter(pick);
+  if (st === 'archived') {
+    /* bake display coords of live positionless children FIRST, so they stay
+       put instead of teleporting to the orphan fallback zone when their
+       anchor parent archives (#513 relocation; the operator report 2026-08-05, #885) */
+    const batch = new Set(picked.map((c) => c.id));
+    const baked = new Set();
+    for (const c of picked) for (const l of LINKS) {
+      if (l.parent !== c.id || l.kind !== 'child') continue;
+      const k = CARDS.get(l.child);
+      if (!k || k.status === 'archived' || baked.has(k.id)) continue;
+      if (k.x != null && k.y != null) continue;              // already positioned
+      const anchorLeft = LINKS.some((l2) => l2.child === k.id && l2.kind === 'child' &&
+        !batch.has(l2.parent) &&
+        (CARDS.get(l2.parent) || {}).status && CARDS.get(l2.parent).status !== 'archived');
+      if (anchorLeft) continue;                              // still hangs under a live parent
+      baked.add(k.id);
+      const p = dispPos(k);                                  // current on-screen spot
+      const r = await act({ action: 'edit', id: k.id, x: p.x, y: p.y });
+      if (r) { k.x = p.x; k.y = p.y; }
+    }
+  }
+  for (const c of picked) {
     const r = await act({ action: 'status', id: c.id, status: st });
     if (r) { n++;
       /* archiving a card that's open in the side panel closes that view
@@ -1344,8 +1709,8 @@ function fitTo(cs) {
   V.ty = 100 - y1 * V.s + (innerHeight - 140 - H * V.s) / 2;
   apply();
 }
-/* fit = everything, archive quadrant included */
-function fitAll() { fitTo([...CARDS.values()]); }
+/* fit = everything rendered (archived cards are hidden, #960) */
+function fitAll() { fitTo([...CARDS.values()].filter(visible)); }
 $('fit').onclick = fitAll;
 $('newcard').onclick = () => openEditor(null, null);
 /* (?) popover: gesture legend + limits legend, out of the titlebar (operator directive 2026-07-31, #626) */
@@ -1422,15 +1787,20 @@ document.addEventListener('keydown', (e) => {
   await poll();
   // drop restored ids whose cards no longer exist (archived-away, deleted)
   for (const id of [...expanded]) if (!CARDS.has(id)) { expanded.delete(id); sel.delete(id); }
-  // seed the seen-set (#372): stored set if any, else "everything current is
-  // seen" so the feature starts quiet; prune dead ids to keep it bounded.
-  try {
-    const s = JSON.parse(localStorage.{{AGENT_NAME}}Seen || 'null');
-    seen = Array.isArray(s) ? new Set(s.filter(Number.isInteger)) : new Set(CARDS.keys());
-  } catch (_) { seen = new Set(CARDS.keys()); }
-  for (const id of [...seen]) if (!CARDS.has(id)) seen.delete(id);
-  saveSeen();
+  // seen-set (#372) is server-side since #971. Unseeded server → one-time
+  // migration: push this browser's old localStorage set (first board wins);
+  // no stored set → "everything current is seen" so the feature starts quiet.
+  if (!seenSeeded) {
+    let s = null;
+    try { s = JSON.parse(localStorage.{{AGENT_NAME}}Seen || 'null'); } catch (_) {}
+    const ids = Array.isArray(s) ? s.filter(Number.isInteger) : [...CARDS.keys()];
+    await act({ action: 'seen-seed', ids });
+    await poll();                              // pull the authoritative set back
+  }
+  seen = new Set(seenSrv || []);
+  try { localStorage.removeItem('{{AGENT_NAME}}Seen'); } catch (_) {}  // migrated
   render();                                  // first render ran with seen=null
+  pollHud();                                 // jet-HUD tails without the 2.5s wait (#988)
   if (savedV && Number.isFinite(savedV.s) && savedV.s > 0
       && Number.isFinite(savedV.tx) && Number.isFinite(savedV.ty)) {
     Object.assign(V, savedV); apply();       // restore last pan/zoom

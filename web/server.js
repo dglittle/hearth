@@ -40,6 +40,7 @@ if (process.env.CARDS_DB && !process.env.BOARD_TEST &&
 const DB_PATH = process.env.CARDS_DB || path.join(HOME, 'db', 'cards.db');
 const ERG_JS = path.join(HOME, 'erg.js');
 const REPORTS = path.join(HOME, 'output', 'reports'); // legacy 🧾 html companions
+const IMGS = path.join(HOME, 'imgs');                 // pasted images (#1168): board POST /img → file; {{AGENT_NAME}} reads imgs/<name> from disk
 const KEY = fs.readFileSync(path.join(__dirname, 'key.txt'), 'utf8').trim();
 
 // ---- host.conf: per-host paths (gitignored; see ../host.conf.example) ----
@@ -60,6 +61,10 @@ const alive = (pid) => { try { process.kill(pid, 0); return true; } catch (_) { 
 const db = new DatabaseSync(DB_PATH);
 db.exec('PRAGMA busy_timeout = 10000; PRAGMA foreign_keys = ON;');
 try { db.exec('ALTER TABLE ergs ADD COLUMN sid TEXT'); } catch (_) {}  // migration (warm-resume, card #756)
+// seen-set is server-side so gold ✦ new syncs across machines (card #971).
+// Row id=0 = "seeded" sentinel (card ids start at 1) — until a client seeds
+// (one-time migration from its localStorage set), clients keep local behavior.
+db.exec('CREATE TABLE IF NOT EXISTS seen (id INTEGER PRIMARY KEY)');
 
 const KINDS = ['mind', 'memory', 'human', '{{AGENT_NAME}}', 'erg', 'header'];
 // two-kind interface (operator directive 2026-07-29, card #275); aliases for stray callers
@@ -75,6 +80,8 @@ let lastReap = 0;
 function reap(force) {
   if (!force && Date.now() - lastReap < 15_000) return;   // throttle for the 5s poll
   lastReap = Date.now();
+  // prune seen ids of deleted cards (keeps the set bounded; sentinel 0 stays)
+  try { db.prepare('DELETE FROM seen WHERE id != 0 AND id NOT IN (SELECT id FROM cards)').run(); } catch (_) {}
   const held = db.prepare(
     `SELECT c.id, c.lock_erg, c.lock_at, e.pid FROM cards c
      LEFT JOIN ergs e ON e.id = c.lock_erg WHERE c.lock_erg IS NOT NULL`).all();
@@ -186,8 +193,13 @@ function dataState(since) {
   // titlebar 💸 widget. Tiny aggregate; rides the existing 5s poll.
   const spend = db.prepare(
     'SELECT COALESCE(SUM(usd),0) AS usd, COUNT(*) AS ergs FROM costs').get();
+  // server-side seen-set (card #971): full list every poll (small — ints only;
+  // the ids array is already full each poll too). ORDER BY = stable JSON for
+  // the client's cheap changed-check.
+  const seenRows = db.prepare('SELECT id FROM seen ORDER BY id').all().map((r) => r.id);
   return { ok: true, ver: pageVer(), full, generated_at: nowIso(), divider: 0,
-           cards, ids, links, ergs, warm: warmSessions(), spend };
+           cards, ids, links, ergs, warm: warmSessions(), spend,
+           seen: seenRows.filter((id) => id !== 0), seenSeeded: seenRows[0] === 0 };
 }
 
 // ---- warm sessions (card #756): {{AGENT_NAME}} output cards whose claude session is
@@ -349,6 +361,41 @@ const ACTIONS = {
     });
   },
 
+  // ---- server-side seen-set (card #971): gold ✦ new syncs across machines ----
+  seen(p) {     // mark cards seen (✦ off everywhere)
+    const ids = (p.ids || []).map((v) => intOrNull(v, 'id'));
+    if (!ids.length) throw new Error('ids[] required');
+    return tx(() => {
+      const ins = db.prepare('INSERT OR IGNORE INTO seen(id) VALUES(?)');
+      for (const id of ids) if (id > 0) ins.run(id);
+      recordAct('seen', p);
+      return { marked: ids.length };
+    });
+  },
+
+  unsee(p) {    // gmail-style "mark unread": ✦ back on everywhere
+    const ids = (p.ids || []).map((v) => intOrNull(v, 'id'));
+    if (!ids.length) throw new Error('ids[] required');
+    return tx(() => {
+      const del = db.prepare('DELETE FROM seen WHERE id = ?');
+      for (const id of ids) if (id > 0) del.run(id);
+      recordAct('unsee', p);
+      return { unmarked: ids.length };
+    });
+  },
+
+  'seen-seed'(p) {  // one-time migration: first board to load pushes its
+    const ids = (p.ids || []).map((v) => intOrNull(v, 'id'));  // localStorage set
+    return tx(() => {
+      if (db.prepare('SELECT 1 FROM seen WHERE id = 0').get()) return { seeded: false };
+      const ins = db.prepare('INSERT OR IGNORE INTO seen(id) VALUES(?)');
+      ins.run(0);
+      for (const id of ids) if (id > 0) ins.run(id);
+      recordAct('seen-seed', { n: ids.length });
+      return { seeded: true, n: ids.length };
+    });
+  },
+
   'archive-thread'(p) {
     const id = intOrNull(p.id, 'id');
     return tx(() => {
@@ -418,6 +465,156 @@ const ACTIONS = {
     return { stopped };
   },
 };
+
+// ---- /hud (operator directive 2026-08-06, #988): live claude-stream tail per running erg ----
+// The board floats a jet-HUD overlay over each running erg's output card; this
+// feeds it. sid comes from the ergs row (erg.js records it at attempt start
+// since #988) or, for ergs started before that patch, from the claude child's
+// cmdline in /proc (--session-id/--resume <sid>). Reads the transcript's last
+// 128KB and compacts it to display lines: tool calls, text, thinking, results.
+const hudSidCache = new Map();          // erg id -> sid (proc-scan results)
+function hudSid(e) {
+  if (e.sid) return e.sid;
+  const hit = hudSidCache.get(e.id);
+  if (hit) return hit;
+  try {
+    for (const d of fs.readdirSync('/proc')) {
+      if (!/^\d+$/.test(d)) continue;
+      let stat, cmd;
+      try { stat = fs.readFileSync('/proc/' + d + '/stat', 'utf8'); } catch (_) { continue; }
+      // stat = "pid (comm) state ppid …" — comm may contain spaces/parens
+      const ppid = +stat.slice(stat.lastIndexOf(')') + 2).split(' ')[1];
+      if (ppid !== e.pid) continue;
+      try { cmd = fs.readFileSync('/proc/' + d + '/cmdline', 'utf8'); } catch (_) { continue; }
+      const a = cmd.split('\0');
+      const i = a.findIndex((x) => x === '--session-id' || x === '--resume');
+      if (i >= 0 && a[i + 1]) {
+        if (hudSidCache.size > 200) hudSidCache.clear();
+        hudSidCache.set(e.id, a[i + 1]);
+        return a[i + 1];
+      }
+    }
+  } catch (_) {}
+  return null;
+}
+function hudTail(sid) {
+  const f = path.join(TRANSCRIPTS, sid + '.jsonl');
+  const st = fs.statSync(f);
+  const from = Math.max(0, st.size - 131072);
+  const buf = Buffer.alloc(st.size - from);
+  const fd = fs.openSync(f, 'r');
+  try { fs.readSync(fd, buf, 0, buf.length, from); } finally { fs.closeSync(fd); }
+  const raw = buf.toString('utf8').split('\n');
+  if (from > 0) raw.shift();                       // drop the cut-off first line
+  // Thinking TEXT never reaches the transcript (blocks carry only a signature —
+  // content is encrypted out), so per-turn thinking tokens are ESTIMATED:
+  // usage.output_tokens is the whole turn and is repeated on every block-entry
+  // of that turn; subtract the visible blocks' chars/4 (#1004b).
+  // Pass 1: parse events + aggregate per turn (message.id).
+  const evs = [], turns = new Map();
+  let lastT = null;                                // last user/assistant entry type
+  for (const ln of raw) {
+    if (!ln.trim()) continue;
+    let o; try { o = JSON.parse(ln); } catch (_) { continue; }
+    if (o.type === 'user' || o.type === 'assistant') lastT = o.type;
+    const cont = o.message && Array.isArray(o.message.content) ? o.message.content : [];
+    const mid = o.type === 'assistant' && o.message && o.message.id;
+    let tn = null;
+    if (mid) {
+      tn = turns.get(mid) || { out: 0, vis: 0, think: false };
+      const u = o.message.usage;
+      if (u && u.output_tokens > tn.out) tn.out = u.output_tokens;
+      turns.set(mid, tn);
+    }
+    for (const c of cont) {
+      if (o.type === 'assistant' && c.type === 'tool_use') {
+        if (tn) tn.vis += (c.name || '').length + JSON.stringify(c.input || {}).length;
+        evs.push({ o, c });
+      } else if (o.type === 'assistant' && c.type === 'text') {
+        if (tn) tn.vis += String(c.text || '').length;
+        evs.push({ o, c });
+      } else if (o.type === 'assistant' && c.type === 'thinking') {
+        if (tn) { tn.think = true; tn.vis += String(c.thinking || '').length; }
+        evs.push({ o, c, mid });
+      } else if (o.type === 'user' && c.type === 'tool_result') evs.push({ o, c });
+    }
+  }
+  // Pass 2: build display lines.
+  const out = [], sealedSeen = new Set();          // one sealed-thought line per turn
+  const push = (k, t) => { t = String(t || '').replace(/\s+/g, ' ').trim();
+    if (t) out.push({ k, t: t.slice(0, 140) }); };
+  for (const { o, c, mid } of evs) {
+    if (c.type === 'tool_use') {
+      const i = c.input || {};
+      const d = c.name === 'Bash' ? (i.command || i.description) :
+        i.file_path ? String(i.file_path).replace(/^.*\//, '') :
+        i.pattern || i.query || (typeof i.prompt === 'string' ? i.prompt : '');
+      push('tool', '⚒ ' + c.name + (d ? ' · ' + d : ''));
+    } else if (c.type === 'text') push('txt', c.text);
+    else if (c.type === 'thinking') {
+      const txt = String(c.thinking || '').trim();
+      const tn = mid && turns.get(mid);
+      const est = tn ? Math.max(1, tn.out - Math.round((tn.vis - txt.length) / 4)) : 0;
+      if (txt) push('think', '≈ ' + txt);
+      else if (!mid || !sealedSeen.has(mid)) {     // interleaved thinking = several blocks/turn; label once
+        if (mid) sealedSeen.add(mid);
+        push('think', '≈ ⟨thought' + (est ? ' ~' + est + 'tok' : '') + ' — content sealed⟩');
+      }
+    } else if (c.type === 'tool_result') {
+      let s = c.content;
+      if (Array.isArray(s)) s = s.map((x) => (x && x.text) || '').join(' ');
+      if (typeof s !== 'string') s = JSON.stringify(s || '');
+      push('res', '↳ ' + (c.is_error ? '⚠ ' : '') + s);
+    }
+  }
+  // gen: last transcript entry is a user/tool_result → the model is generating
+  // (thinking) RIGHT NOW; last assistant entry = a tool is running or turn ended.
+  // Transcript-poll granularity is all we have — live deltas aren't on disk (#1004b).
+  return { lines: out.slice(-16), gen: lastT === 'user' };
+}
+
+// session-wide thinking-token estimate, incremental per sid so we never rescan
+// the whole transcript on the 2.5s poll (#1004b). Same accounting as hudTail:
+// per turn (message.id), thinking tok ≈ output_tokens − visible chars/4;
+// only turns that contain a thinking block count.
+const thinkCache = new Map();                      // sid -> {off, tok, cur}
+function thinkTok(sid) {
+  const f = path.join(TRANSCRIPTS, sid + '.jsonl');
+  const st = fs.statSync(f);
+  let c = thinkCache.get(sid);
+  if (!c || st.size < c.off) c = { off: 0, tok: 0, cur: null };
+  const fin = (t) => t && t.think ? Math.max(1, t.out - Math.round(t.vis / 4)) : 0;
+  if (st.size > c.off) {
+    const buf = Buffer.alloc(st.size - c.off);
+    const fd = fs.openSync(f, 'r');
+    try { fs.readSync(fd, buf, 0, buf.length, c.off); } finally { fs.closeSync(fd); }
+    const s = buf.toString('utf8');
+    const nl = s.lastIndexOf('\n');                // only consume complete lines
+    if (nl >= 0) {
+      for (const ln of s.slice(0, nl).split('\n')) {
+        if (!ln.includes('"assistant"')) continue;
+        let o; try { o = JSON.parse(ln); } catch (_) { continue; }
+        if (o.type !== 'assistant' || !o.message || !o.message.id) continue;
+        if (!c.cur || c.cur.id !== o.message.id) {
+          c.tok += fin(c.cur);                     // turn boundary → commit prev
+          c.cur = { id: o.message.id, out: 0, vis: 0, think: false };
+        }
+        const u = o.message.usage;
+        if (u && u.output_tokens > c.cur.out) c.cur.out = u.output_tokens;
+        const cont = Array.isArray(o.message.content) ? o.message.content : [];
+        for (const b of cont) {
+          if (b.type === 'thinking') { c.cur.think = true; c.cur.vis += String(b.thinking || '').length; }
+          else if (b.type === 'text') c.cur.vis += String(b.text || '').length;
+          else if (b.type === 'tool_use') c.cur.vis += (b.name || '').length + JSON.stringify(b.input || {}).length;
+        }
+      }
+      c.off += Buffer.byteLength(s.slice(0, nl + 1), 'utf8');
+    }
+    if (thinkCache.size > 100) thinkCache.clear();
+    thinkCache.set(sid, c);
+  }
+  return c.tok + fin(c.cur);                       // include the in-progress turn
+}
 
 // ---- page version: server boot + board.html hash (auto-reload on change) ----
 function pageVer() {
@@ -523,6 +720,57 @@ const handler = (req, res) => {
   if (!ok) return j(403, { ok: false, error: 'bad key' });
 
   if (url.pathname === '/data') return j(200, dataState(url.searchParams.get('since') || ''));
+
+  // ---- pasted images (operator directive 2026-08-11, #1168) ----
+  // POST /img (binary body, image/* content-type) → saves imgs/<name>, returns the
+  // markdown to embed; GET /img/<name> serves it (auth'd like everything else).
+  if (url.pathname === '/img' && req.method === 'POST') {
+    const EXT = { 'image/png': 'png', 'image/jpeg': 'jpg', 'image/webp': 'webp', 'image/gif': 'gif' };
+    const ext = EXT[(req.headers['content-type'] || '').split(';')[0].trim()];
+    if (!ext) return j(400, { ok: false, error: 'unsupported type (png/jpeg/webp/gif)' });
+    const chunks = []; let size = 0;
+    req.on('data', (c) => { size += c.length; if (size > 8_000_000) req.destroy(); else chunks.push(c); });
+    req.on('end', () => {
+      if (!chunks.length) return j(400, { ok: false, error: 'empty body' });
+      const d = new Date().toISOString().replace(/[-:]/g, '').replace('T', '-').slice(0, 15);
+      const name = 'paste-' + d + '-' + crypto.randomBytes(2).toString('hex') + '.' + ext;
+      try {
+        fs.mkdirSync(IMGS, { recursive: true });
+        fs.writeFileSync(path.join(IMGS, name), Buffer.concat(chunks));
+      } catch (e) { return j(500, { ok: false, error: e.message }); }
+      log('img saved: ' + name + ' (' + size + ' B)');
+      return j(200, { ok: true, name, file: 'imgs/' + name, md: '![img](/img/' + name + ')' });
+    });
+    return;
+  }
+  if (url.pathname.startsWith('/img/')) {
+    const name = url.pathname.slice(5);
+    if (!/^[\w.-]+$/.test(name) || name.includes('..')) return j(400, { ok: false, error: 'bad name' });
+    const p = path.join(IMGS, name);
+    if (!fs.existsSync(p)) return j(404, { ok: false, error: 'not found' });
+    const CT = { png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', webp: 'image/webp', gif: 'image/gif' };
+    res.writeHead(200, { 'Content-Type': CT[name.split('.').pop().toLowerCase()] || 'application/octet-stream',
+      'Cache-Control': 'private, max-age=31536000, immutable' });      // names are unique → cache forever
+    return res.end(fs.readFileSync(p));
+  }
+
+  if (url.pathname === '/hud') {                   // jet-HUD stream tails (#988)
+    reap(false);
+    const running = db.prepare(
+      `SELECT id, info_card, pid, sid FROM ergs WHERE status = 'running'`).all()
+      .filter((e) => e.info_card && alive(e.pid));
+    const huds = [];
+    for (const e of running) {
+      const sid = hudSid(e);
+      let lines = [], gen = false, tt = 0;
+      if (sid) try {
+        ({ lines, gen } = hudTail(sid));
+        tt = thinkTok(sid);
+      } catch (_) {}
+      huds.push({ erg: e.id, card: e.info_card, lines, gen, tt });
+    }
+    return j(200, { ok: true, huds });
+  }
 
   if (url.pathname === '/act' && req.method === 'POST') {
     let b = '';
