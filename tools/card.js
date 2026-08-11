@@ -98,15 +98,17 @@ const TIPS_SQL = `
         AND ch.kind != 'erg' AND ch.status != 'archived')
   ORDER BY COALESCE(c.importance,5) + COALESCE(c.urgency,5) DESC, c.updated_at ASC`;
 
-/* interface quadrant (lower-right: x>0 && y>0) is reserved for human/{{AGENT_NAME}}
+/* interface area (the WHOLE lower half: y>0) is reserved for human/{{AGENT_NAME}}
    cards — the mind-card rule. Guard added erg 14 after short-term #57 was
-   created with --x 400 --y 1930 and leaked into the operator's interface. header is
-   exempt (labels go anywhere). Non-numeric/cleared coords pass. */
+   created with --x 400 --y 1930 and leaked into the operator's interface; widened
+   from the lower-right quadrant to the lower half to match the board (operator
+   directive 2026-08-05, #960 — board.html moved in 8b7bbe0, this guard lagged).
+   header is exempt (labels go anywhere). Non-numeric/cleared coords pass. */
 function guardQuadrant(kind, x, y) {
   if (kind === 'human' || kind === '{{AGENT_NAME}}' || kind === 'header') return;
-  const nx = Number(x), ny = Number(y);
-  if (Number.isFinite(nx) && Number.isFinite(ny) && nx > 0 && ny > 0)
-    die(`a ${kind} card may not be placed in the interface quadrant (x>0 && y>0 is for human/{{AGENT_NAME}} cards) — omit coords or use --x none --y none for auto-placement`);
+  const ny = Number(y);
+  if (Number.isFinite(ny) && ny > 0)
+    die(`a ${kind} card may not be placed in the interface half (y>0 is for human/{{AGENT_NAME}} cards) — omit coords or use --x none --y none for auto-placement`);
 }
 
 function getCard(db, id) {
