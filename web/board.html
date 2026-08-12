@@ -331,8 +331,8 @@
     <span>tap away</span><span>close the panel</span>
     <span>⇧tap</span><span>add to selection</span>
     <span>⇧drag</span><span>lasso</span>
-    <span>drag card (top half)</span><span>move it</span>
-    <span>drag card (bottom half)</span><span>move it + all descendants</span>
+    <span>drag card (left half)</span><span>move it</span>
+    <span>drag card (right half)</span><span>move it + all descendants</span>
     <span>2×tap</span><span>edit</span>
     <span>✦ (panel)</span><span>mark a card new again</span>
   </div>
@@ -1158,7 +1158,7 @@ let moved = 0, pinch0 = null, downTarget = null, down0 = null;
 let mode = null;                       // 'pan' | 'band' | 'card'
 let dragIds = null, dragOrig = null;   // card-drag state
 let dragPaths = null;                  // svg paths touching dragged cards (#313)
-let downDeep = false;                  // grab was on the card's BOTTOM half (operator directive 2026-08-11, #1271)
+let downDeep = false;                  // grab was on the card's RIGHT half (operator directive 2026-08-12, #1290)
 let dragFree = null;                   // deep-dragged positionless followers — never baked on commit
 let lastTap = { id: null, t: 0 };
 
@@ -1171,10 +1171,11 @@ vp.addEventListener('pointerdown', (e) => {
     downTarget = e.target; down0 = { x: e.clientX, y: e.clientY };
     const node = e.target.closest && e.target.closest('.node');
     mode = node ? 'card' : (e.shiftKey ? 'band' : 'pan');
-    /* bottom-half grab = deep drag: card + all descendants (operator directive 2026-08-11, #1271) */
+    /* right-half grab = deep drag: card + all descendants (operator directive 2026-08-12,
+       #1290; was bottom-half, #1271) */
     downDeep = false;
     if (node) { const r = node.getBoundingClientRect();
-      downDeep = e.clientY > r.top + r.height / 2; }
+      downDeep = e.clientX > r.left + r.width / 2; }
     if (mode === 'band') { const b = $('band'); b.style.display = 'block';
       Object.assign(b.style, { left: down0.x + 'px', top: down0.y + 'px', width: '0px', height: '0px' }); }
   }
@@ -1220,7 +1221,7 @@ vp.addEventListener('pointermove', (e) => {
       const id = +node.dataset.id;
       if (!sel.has(id)) { sel.clear(); sel.add(id); }
       dragIds = [...sel];
-      /* deep drag (operator directive 2026-08-11, #1271): bottom-half grab pulls every
+      /* deep drag (#1271, zones flipped to left/right — operator directive 2026-08-12, #1290): right-half grab pulls every
          descendant (child-links, recursive) along. Positionless descendants
          (x/y null) ride along visually but go in dragFree — they are never
          baked on commit, since they already re-derive under their parent. */
