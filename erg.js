@@ -238,10 +238,28 @@ const LIMIT_RE = /usage limit|rate[ _-]?limit|limit reached|out of.*(quota|usage
 // Sticky token memory (operator directive 2026-07-26): start on the slot that
 // last succeeded; a successful fallback flips the memory.
 const PREF_FILE = path.join(HOME, 'tok-pref.json');
-let prefSlot = 1;
+let prefSlot = 1, slotWhy = '';
 try {
   const p = JSON.parse(fs.readFileSync(PREF_FILE, 'utf8')).slot;
-  if (Number.isInteger(p) && p >= 1 && p <= TOKS.length) prefSlot = p;
+  if (Number.isInteger(p) && p >= 1 && p <= TOKS.length) { prefSlot = p; slotWhy = 'remembered'; }
+} catch (_) {}
+// f7d-aware choice (operator directive 2026-08-13, #1407): prefer the token whose fable
+// weekly bucket (7d_oi) resets SOONEST, per the most recent limits sample
+// (web/limits.json — the board probes it on every erg finish). Needs a valid
+// reset for EVERY configured slot, else fall back to the sticky memory above.
+// The usual (token, model) fallback chain below is unchanged.
+try {
+  const lim = JSON.parse(fs.readFileSync(path.join(HOME, 'web', 'limits.json'), 'utf8'));
+  const resets = (lim.slots || [])
+    .filter((s) => !s.error && s.slot >= 1 && s.slot <= TOKS.length &&
+                   s.buckets && s.buckets['7d_oi'] && s.buckets['7d_oi'].reset)
+    .map((s) => ({ slot: s.slot, reset: s.buckets['7d_oi'].reset }));
+  if (TOKS.length > 1 && resets.length === TOKS.length) {
+    resets.sort((a, b) => a.reset - b.reset);
+    prefSlot = resets[0].slot;
+    slotWhy = 'f7d resets soonest, ' + new Date(resets[0].reset).toISOString().slice(0, 16) + 'Z' +
+      ' (sample ' + Math.round((Date.now() - lim.at) / 60000) + 'm old)';
+  }
 } catch (_) {}
 const SLOT_ORDER = [prefSlot, ...TOKS.map((_, i) => i + 1).filter((s) => s !== prefSlot)];
 
@@ -388,7 +406,7 @@ function runClaude(args, env) {
       ' [cards #' + parents.join(',#') + ' → out #' + outCard + ']' +
       (model !== MODEL ? ' [' + model + (isResume ? ' — session model' : ' — fable budget dry') + ']' : '') +
       (attempt ? ' (RETRY on token ' + tokSlot + ')'
-               : (tokSlot !== 1 ? ' [token ' + tokSlot + ', remembered]' : '')) +
+               : (slotWhy ? ' [token ' + tokSlot + ', ' + slotWhy + ']' : '')) +
       (extra ? ' :: ' + extra.slice(0, 100).replace(/\n/g, ' ') : ''));
     r = await runClaude(args, env);
     res = null; try { res = JSON.parse(r.stdout); } catch (_) {}

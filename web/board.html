@@ -67,6 +67,10 @@
   /* a bit of air between the two token sections (operator directive 2026-07-31, #636) */
   #limits .tok + .tok { margin-left:.65em; }
   #limits .tn { color:#c9a86a; }
+  /* token used by the most recent erg (operator directive 2026-08-13, #1407) */
+  #limits .tok.cur { background:rgba(201,168,106,.13); border:1px solid rgba(201,168,106,.35);
+    border-radius:5px; padding:1px 4px; }
+  #limits .tok.cur .tn { color:#ffd98a; font-weight:600; }
   #limits .dial { display:inline-flex; flex-direction:column; gap:1px; line-height:1.15; }
   #limits .dial b { font-weight:600; color:var(--c-output); }
   #limits .dial.warn b { color:#e8b33f; }
@@ -239,6 +243,13 @@
     border-right:3px solid; border-top:3px solid; border-top-right-radius:16px; }
   .node.k-zone .zmove.bl { left:-2px; bottom:-2px;
     border-left:3px solid; border-bottom:3px solid; border-bottom-left-radius:16px; }
+  /* fat hit boxes (operator directive 2026-08-13, #1392): an invisible pad grows each
+     corner's grab target to ~50×50 (22px visual + 14px in every direction,
+     reaching outside the zone too). Pointer events on a pseudo-element
+     target the host, so closest('.zgrip'/'.zmove') keeps working; cards sit
+     later in the DOM, so they still win where they overlap a pad. */
+  .node.k-zone .zgrip::before, .node.k-zone .zmove::before {
+    content:''; position:absolute; inset:-14px; }
   .node.k-zone.sel { outline-offset:0; }
   .node.st-done .ttl { color:var(--dim); }
   .node.arch { opacity:.38; }
@@ -386,7 +397,9 @@
   7-day window). Hover any bar for exact numbers. The number at the end is <b>how
   long ago</b> the last probe ran (<b>3m</b>, <b>2h</b>, <b>1d</b>) — it re-probes when an
   erg finishes with this page open, on a stale page load, or when you hit ↻ (server allows
-  one probe per 90s).</p>
+  one probe per 90s). The <b>gold-boxed token</b> is the one the most recent erg ran on;
+  new ergs start on the token whose f7d resets soonest (per the last probe), falling
+  back to the other on a limit hit.</p>
 </div>
 
 <div id="abar">
@@ -1819,8 +1832,12 @@ const LIMIT_WIN = { '5h': 5 * 3600e3, '7d': 7 * 86400e3, '7d_oi': 7 * 86400e3 };
 const fmtReset = (ms) => ms ? new Date(ms).toLocaleString([], { weekday: 'short', hour: '2-digit', minute: '2-digit' }) : '?';
 function renderLimits(d) {
   limitsData = d;
+  const curSlot = d.last ? d.last.slot : null;   // token of the most recent erg (#1407)
   const rows = (d.slots || []).map((s) => {
-    if (s.error) return '<span class="tok"><span class="tn">t' + s.slot + '</span> <span class="dial crit" title="' + esc(String(s.error)) + '"><b>probe failed</b></span></span>';
+    const cur = s.slot === curSlot;
+    const tokOpen = '<span class="tok' + (cur ? ' cur' : '') + '"' +
+      (cur ? ' title="used by the most recent erg' + (d.last.erg ? ' (#' + d.last.erg + ')' : '') + '"' : '') + '>';
+    if (s.error) return tokOpen + '<span class="tn">t' + s.slot + '</span> <span class="dial crit" title="' + esc(String(s.error)) + '"><b>probe failed</b></span></span>';
     // stacked layout (operator directive 2026-07-31, #658), re-compacted (#662): one grid row
     // per bucket; the 5h time-bar rides under the 5h use-bar in the SAME row
     // (.bstack), the shared 7d time-bar under the last weekly row. `.sec` on
@@ -1851,7 +1868,7 @@ function renderLimits(d) {
         timeBar('7d', [(bk['7d'] || {}).reset, (bk['7d_oi'] || {}).reset]) + '</span>';
       cells.push('<span class="lb' + cls + sec + '" title="' + title + '">' + lab + '</span>' + stack);
     }
-    return '<span class="tok"><span class="tn">t' + s.slot + '</span><span class="lgrid">' + cells.join('') + '</span></span>';
+    return tokOpen + '<span class="tn">t' + s.slot + '</span><span class="lgrid">' + cells.join('') + '</span></span>';
   }).join('') || '<span class="dial">(no data — hit ↻)</span>';
   $('limits').innerHTML = rows +
     '<span class="asof" id="limage"></span>' +

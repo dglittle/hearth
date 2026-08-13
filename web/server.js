@@ -669,6 +669,22 @@ function probeOne(tok, slot) {
 function readLimitsCache() {
   try { return JSON.parse(fs.readFileSync(LIMITSF, 'utf8')); } catch (_) { return null; }
 }
+// token slot the most recent erg ran on (operator directive 2026-08-13, #1407): tail the
+// erg ledger (../ergs.jsonl); tokSlot is omitted there when it's 1.
+const LEDGERF = path.join(__dirname, '..', 'ergs.jsonl');
+function lastErgSlot() {
+  try {
+    const fd = fs.openSync(LEDGERF, 'r');
+    const size = fs.fstatSync(fd).size;
+    const len = Math.min(size, 16384);
+    const buf = Buffer.alloc(len);
+    fs.readSync(fd, buf, 0, len, size - len);
+    fs.closeSync(fd);
+    const lines = buf.toString('utf8').trim().split('\n');
+    const o = JSON.parse(lines[lines.length - 1]);
+    return { slot: o.tokSlot || 1, erg: o.erg };
+  } catch (_) { return null; }
+}
 function probeLimits(why) {
   const toks = readToks();
   return Promise.all(toks.map((t, i) => t ? probeOne(t, i + 1) : null).filter(Boolean))
@@ -798,12 +814,13 @@ const handler = (req, res) => {
     const age = cached ? Date.now() - cached.at : Infinity;
     if (url.searchParams.get('probe') === '1' && !probing && age > PROBE_MIN_MS)
       probing = probeLimits(url.searchParams.get('why') || 'page').finally(() => { probing = null; });
+    const last = lastErgSlot();
     if (url.searchParams.get('probe') === '1' && probing) {
-      probing.then((d) => j(200, { ok: true, ...d }))
-             .catch(() => j(200, { ok: true, ...(cached || { at: 0, slots: [] }) }));
+      probing.then((d) => j(200, { ok: true, last, ...d }))
+             .catch(() => j(200, { ok: true, last, ...(cached || { at: 0, slots: [] }) }));
       return;
     }
-    return j(200, { ok: true, ...(cached || { at: 0, slots: [] }) });
+    return j(200, { ok: true, last, ...(cached || { at: 0, slots: [] }) });
   }
 
   res.writeHead(404); res.end('{"ok":false}');
