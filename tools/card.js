@@ -17,8 +17,10 @@ const path = require('node:path');
 
 const DB_PATH = process.env.CARDS_DB || path.join(__dirname, '..', 'db', 'cards.db');
 const SCHEMA_PATH = path.join(__dirname, '..', 'db', 'schema.sql');
-const KINDS = ['mind', 'memory', 'human', '{{AGENT_NAME}}', 'erg', 'header'];
-// two-kind interface (the operator 2026-07-29, card #275): lower-right = human + {{AGENT_NAME}} only;
+const KINDS = ['mind', 'memory', 'human', '{{AGENT_NAME}}', 'erg', 'header', 'zone'];
+// 'zone' (operator directive 2026-08-12, #1295): decorative colored rectangle behind cards —
+// pure organization, no chain semantics; the board paints it under everything.
+// two-kind interface (operator directive 2026-07-29, card #275): lower-right = human + {{AGENT_NAME}} only;
 // old input/output/work kinds retired — aliases keep stray callers working.
 // 'memory' replaces short-term/long-term (operator directive 2026-08-02, card #780): ONE
 // recursive kind; top-level memory TITLES go in the system prompt, child
@@ -105,7 +107,7 @@ const TIPS_SQL = `
    directive 2026-08-05, #960 — board.html moved in 8b7bbe0, this guard lagged).
    header is exempt (labels go anywhere). Non-numeric/cleared coords pass. */
 function guardQuadrant(kind, x, y) {
-  if (kind === 'human' || kind === '{{AGENT_NAME}}' || kind === 'header') return;
+  if (kind === 'human' || kind === '{{AGENT_NAME}}' || kind === 'header' || kind === 'zone') return;  // zones decorate anywhere (#1295)
   const ny = Number(y);
   if (Number.isFinite(ny) && ny > 0)
     die(`a ${kind} card may not be placed in the interface half (y>0 is for human/{{AGENT_NAME}} cards) — omit coords or use --x none --y none for auto-placement`);

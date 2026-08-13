@@ -207,6 +207,39 @@
     color:#e8c15a; letter-spacing:.05em; text-transform:uppercase; white-space:nowrap; }
   .node.k-header.fresh { background:none; border-color:transparent; }
   .node.k-header.arch { opacity:.25; }
+  /* decorative zones (operator directive 2026-08-12, #1295): big translucent colored
+     rectangles painted BEHIND everything (first in the DOM, before the svg) —
+     an organizational tool, no chain semantics. Color comes from the card
+     BODY (a name like "teal" or a #hex); title = the corner label; drag the
+     ⌟ grip to resize. Colors are inline styles, so the .fresh gold never
+     paints over them; zones are excluded from lasso (they'd swallow every
+     band) — select/edit only from the corner grips (#1345); the body acts
+     like empty space (pan / ⇧lasso / tap-clears). */
+  .node.k-zone { background:none; border:2px solid; border-radius:16px;
+    padding:0; overflow:visible; }
+  /* title spans the zone's full width (operator directive 2026-08-12, #1326): base 16px is
+     just the measuring size — fitZoneTitles() rescales each label after render
+     so the text runs edge to edge; color is muted toward the zone color. */
+  .node.k-zone .zttl { position:absolute; left:12px; top:7px;
+    font:700 16px -apple-system,"Segoe UI",Helvetica,sans-serif;
+    letter-spacing:.06em; text-transform:uppercase; white-space:nowrap;
+    pointer-events:none; }
+  .node.k-zone .zgrip { position:absolute; right:-2px; bottom:-2px;
+    width:22px; height:22px; cursor:nwse-resize;
+    border-right:3px solid; border-bottom:3px solid; border-color:inherit;
+    border-bottom-right-radius:16px; opacity:.7; }
+  /* the other 3 corners = MOVE grips (operator directive 2026-08-12, #1324): zones only
+     move by dragging a corner — a body grab pans the board instead, so a
+     big zone never hijacks drags over the cards it frames. */
+  .node.k-zone .zmove { position:absolute; width:22px; height:22px;
+    cursor:move; border-color:inherit; opacity:.7; }
+  .node.k-zone .zmove.tl { left:-2px; top:-2px;
+    border-left:3px solid; border-top:3px solid; border-top-left-radius:16px; }
+  .node.k-zone .zmove.tr { right:-2px; top:-2px;
+    border-right:3px solid; border-top:3px solid; border-top-right-radius:16px; }
+  .node.k-zone .zmove.bl { left:-2px; bottom:-2px;
+    border-left:3px solid; border-bottom:3px solid; border-bottom-left-radius:16px; }
+  .node.k-zone.sel { outline-offset:0; }
   .node.st-done .ttl { color:var(--dim); }
   .node.arch { opacity:.38; }
   .node.sel { outline:2.5px solid var(--sel); outline-offset:2px; opacity:1; }
@@ -279,6 +312,7 @@
   #edbox input, #edbox textarea, #edbox select { background:#0d1014; color:var(--ink);
     border:1px solid var(--line); border-radius:8px; padding:7px 9px; font:12.5px/1.4 inherit; }
   #edbox input[type=number] { width:64px; }
+  #edbox input[type=color] { width:44px; height:26px; padding:1px 2px; cursor:pointer; }
   #ed-title { width:100%; }
   #ed-body { width:100%; height:180px; resize:vertical; font-family:ui-monospace,Menlo,monospace; font-size:12px; }
   #edbox .row { display:flex; gap:8px; margin-top:8px; align-items:center; flex-wrap:wrap; }
@@ -336,6 +370,14 @@
     <span>2×tap</span><span>edit</span>
     <span>✦ (panel)</span><span>mark a card new again</span>
   </div>
+  <h5 class="n">zones</h5>
+  <p>Decorative colored rectangles behind the cards (+ card → kind <b>zone</b>).
+  Body = the color (<b>teal</b>, <b>purple</b>, … or <b>#3a5ba0</b>; empty = auto —
+  or use the color button in the editor); title spans the full width. Drag a
+  <b>⌜ ⌞</b> corner to move the zone alone, the <b>⌝</b> corner to move it
+  <b>with everything inside it</b>, the <b>⌟</b> corner to resize. Tap a
+  corner to select, 2×tap one to edit; the body acts like empty space
+  (drag pans, ⇧drag lassos, tap clears); lasso ignores zones.</p>
   <h5 class="n">limits dials</h5>
   <p><b>t1</b>/<b>t2</b> = the two subscription tokens. Per token: <b>5h</b> rolling
   window · <b>7d</b> weekly (all models) · <b>f7d</b> fable weekly (API bucket 7d_oi).
@@ -367,10 +409,12 @@
     <select id="ed-kind">
       <option>human</option><option>{{AGENT_NAME}}</option>
       <option>memory</option><option>mind</option>
-      <option>header</option>
+      <option>header</option><option>zone</option>
     </select>
     <label>imp <input id="ed-imp" type="number" min="1" max="10"></label>
     <label>urg <input id="ed-urg" type="number" min="1" max="10"></label>
+    <label id="ed-colorwrap" style="display:none">color
+      <input id="ed-color" type="color" title="zone color → writes the #hex into the body"></label>
     <input id="ed-url" placeholder="url (optional)">
   </div>
   <div class="row"><textarea id="ed-body" placeholder="body (markdown)"></textarea></div>
@@ -621,7 +665,8 @@ async function poll() {
 }
 
 /* ---- geometry ---- */
-const cw = (c) => c.w || 240, ch = (c) => c.h || 96;
+const cw = (c) => c.w || (c.kind === 'zone' ? 560 : 240),
+      ch = (c) => c.h || (c.kind === 'zone' ? 360 : 96);   // zone defaults (#1295)
 let posCache = new Map();
 /* default drop slot for a new/positionless child (operator directive 2026-08-06, #986):
    directly beneath the parent — touching + aligned, exactly like 🗂 stack.
@@ -718,6 +763,47 @@ function plinksHtml(id) {
 /* pulsing = being worked right now — carried by the jet-HUD overlay itself
    (#999: node border pulse retired, it was hidden under the HUD) */
 
+/* ---- decorative zones (operator directive 2026-08-12, #1295): color = first #hex or color
+   word in the BODY; no/unknown color → stable palette pick by id ---- */
+const ZPAL = ['#4ea3f0', '#5fc88f', '#e8a33d', '#e05563', '#a06ee0', '#4fc4c4', '#e07ab0', '#9aa5b1'];
+const ZNAMES = { red: '#e05563', orange: '#e8843d', yellow: '#e8c15a', gold: '#e8c15a',
+  green: '#5fc88f', teal: '#4fc4c4', cyan: '#4fc4c4', blue: '#4ea3f0', navy: '#3a5ba0',
+  purple: '#a06ee0', violet: '#a06ee0', pink: '#e07ab0', magenta: '#d05fc0',
+  gray: '#9aa5b1', grey: '#9aa5b1', white: '#d7dee6', brown: '#a97a4f' };
+function zoneColor(c) {
+  const s = String(c.body || '').toLowerCase();
+  const m = s.match(/#[0-9a-f]{6}\b|#[0-9a-f]{3}\b/);
+  if (m) return m[0];
+  for (const w of s.split(/[^a-z]+/)) if (ZNAMES[w]) return ZNAMES[w];
+  return ZPAL[c.id % ZPAL.length];
+}
+function zoneRgb(hex) {                       // '#abc'/'#aabbcc' → 'r,g,b'
+  let h = hex.slice(1);
+  if (h.length === 3) h = h.replace(/./g, (x) => x + x);
+  const n = parseInt(h, 16);
+  return ((n >> 16) & 255) + ',' + ((n >> 8) & 255) + ',' + (n & 255);
+}
+const zoneHex6 = (hex) => {                   // normalize → '#aabbcc' (for <input type=color>)
+  let h = hex.slice(1);
+  if (h.length === 3) h = h.replace(/./g, (x) => x + x);
+  return '#' + h;
+};
+/* title fills the zone's full width (operator directive 2026-08-12, #1326): measure each
+   label at its 16px base, then scale font-size linearly (letter-spacing is
+   em-based, so width scales with it) to span the zone minus the 12px pads;
+   capped at 60% of the zone height so short-wide zones stay sane. */
+function fitZoneTitles(one) {
+  for (const el of (one ? [one] : world.querySelectorAll('.node.k-zone'))) {
+    const t = el.querySelector('.zttl');
+    if (!t || !t.textContent.trim()) continue;
+    t.style.fontSize = '16px';                             // reset to measuring base
+    const nat = t.offsetWidth;
+    if (!nat) continue;
+    const target = el.offsetWidth - 24;                    // 12px pad each side
+    t.style.fontSize = Math.max(9, Math.min(16 * target / nat, el.offsetHeight * .6)) + 'px';
+  }
+}
+
 /* ---- render (full rebuild; deferred while fingers down or editor open) ---- */
 function render() {
   if (ptrs.size || editorOpen) { pendingRender = true; return; }
@@ -758,10 +844,26 @@ function render() {
   }
   svg += '</svg>';
 
-  let html = svg;
+  /* zones paint FIRST = behind the arrows and every card (#1295) */
+  let html = '';
+  for (const c of cards) {
+    if (c.kind !== 'zone') continue;
+    const p = pos.get(c.id);
+    const rgb = zoneRgb(zoneColor(c));
+    html += `<div class="node k-zone${sel.has(c.id) ? ' sel' : ''}${c.status === 'archived' ? ' arch' : ''}" data-id="${c.id}"
+        style="left:${p.x}px;top:${p.y}px;width:${cw(c)}px;height:${ch(c)}px;
+        background:rgba(${rgb},.10);border-color:rgba(${rgb},.55)">
+      <div class="zttl" style="color:rgba(${rgb},.35)">${esc(c.title)}</div>
+      <div class="zmove tl" title="drag to move"></div>
+      <div class="zmove tr" title="drag to move"></div>
+      <div class="zmove bl" title="drag to move"></div>
+      <div class="zgrip" title="drag to resize"></div></div>`;
+  }
+  html += svg;
   const stGlyph = { draft: '●', ready: '●', done: '✓ done', archived: '📥' };  // draft = live; 'ready' retired 2026-07-28 (glyph kept for stragglers)
   const stColor = { draft: '#6fb3e8', ready: '#6fb3e8', done: '#5fc88f', archived: '#8a97a5' };
   for (const c of cards) {
+    if (c.kind === 'zone') continue;               // painted above, behind everything (#1295)
     const p = pos.get(c.id);
     const fresh = seen && !seen.has(c.id);
     const cls = ['node', 'k-' + c.kind, 'st-' + c.status,
@@ -801,6 +903,7 @@ function render() {
       style="left:${p.x - cw(c) * .35}px;top:${p.y - ch(c) * .35}px;width:${cw(c) * 1.7}px;height:${ch(c) * 1.7}px"></${tag}>`;
   }
   world.innerHTML = html;
+  fitZoneTitles();
   paintHuds();
   renderPanel();
   updateBars();
@@ -1160,6 +1263,7 @@ let dragIds = null, dragOrig = null;   // card-drag state
 let dragPaths = null;                  // svg paths touching dragged cards (#313)
 let downDeep = false;                  // grab was on the card's RIGHT half (operator directive 2026-08-12, #1290)
 let dragFree = null;                   // deep-dragged positionless followers — never baked on commit
+let zsz = null;                        // zone resize state (#1295): {id, el, w0, h0, w, h}
 let lastTap = { id: null, t: 0 };
 
 vp.addEventListener('pointerdown', (e) => {
@@ -1171,6 +1275,20 @@ vp.addEventListener('pointerdown', (e) => {
     downTarget = e.target; down0 = { x: e.clientX, y: e.clientY };
     const node = e.target.closest && e.target.closest('.node');
     mode = node ? 'card' : (e.shiftKey ? 'band' : 'pan');
+    /* ⌟ grip on a zone = resize, not drag (#1295) */
+    zsz = null;
+    if (node && e.target.closest && e.target.closest('.zgrip')) {
+      mode = 'zsize';
+      zsz = { id: +node.dataset.id, el: node, w0: node.offsetWidth, h0: node.offsetHeight };
+    }
+    /* zones move only from the other 3 corners (operator directive 2026-08-12, #1324):
+       a body grab falls through to PAN — tap-select/2×tap still work at
+       pointerup (moved < 7 → tap()). ⇧ keeps the lasso even over a zone
+       (operator directive 2026-08-12, #1334) — zones frame cards, so band-selecting
+       through them must work. */
+    else if (node && node.classList.contains('k-zone')
+             && !(e.target.closest && e.target.closest('.zmove')))
+      mode = e.shiftKey ? 'band' : 'pan';
     /* right-half grab = deep drag: card + all descendants (operator directive 2026-08-12,
        #1290; was bottom-half, #1271) */
     downDeep = false;
@@ -1198,6 +1316,14 @@ vp.addEventListener('pointermove', (e) => {
   }
   if (ptrs.size !== 1) return;
   if (mode === 'pan') { V.tx += dx; V.ty += dy; apply(); return; }
+  if (mode === 'zsize' && zsz) {                     // zone resize, live (#1295)
+    const dxw = (e.clientX - down0.x) / V.s, dyw = (e.clientY - down0.y) / V.s;
+    zsz.w = Math.max(160, Math.round(zsz.w0 + dxw));
+    zsz.h = Math.max(80, Math.round(zsz.h0 + dyw));
+    zsz.el.style.width = zsz.w + 'px'; zsz.el.style.height = zsz.h + 'px';
+    fitZoneTitles(zsz.el);                           // title tracks the new width live (#1326)
+    return;
+  }
   if (mode === 'band') {
     const b = $('band');
     Object.assign(b.style, {
@@ -1209,6 +1335,7 @@ vp.addEventListener('pointermove', (e) => {
     const y1 = (Math.min(down0.y, e.clientY) - V.ty) / V.s, y2 = (Math.max(down0.y, e.clientY) - V.ty) / V.s;
     for (const el of world.querySelectorAll('.node')) {
       const c = CARDS.get(+el.dataset.id); if (!c) continue;
+      if (c.kind === 'zone') continue;   // zones would swallow every lasso (#1295); tap-select them
       const p = dispPos(c);
       const inBand = p.x < x2 && p.x + cw(c) > x1 && p.y < y2 && p.y + ch(c) > y1;
       el.classList.toggle('sel', inBand || sel.has(c.id));
@@ -1221,7 +1348,7 @@ vp.addEventListener('pointermove', (e) => {
       const id = +node.dataset.id;
       if (!sel.has(id)) { sel.clear(); sel.add(id); }
       dragIds = [...sel];
-      /* deep drag (#1271, zones flipped to left/right — operator directive 2026-08-12, #1290): right-half grab pulls every
+      /* deep drag (#1271, zones flipped to left/right #1290): right-half grab pulls every
          descendant (child-links, recursive) along. Positionless descendants
          (x/y null) ride along visually but go in dragFree — they are never
          baked on commit, since they already re-derive under their parent. */
@@ -1235,6 +1362,19 @@ vp.addEventListener('pointermove', (e) => {
               const kid = CARDS.get(l.child);
               if (kid && visible(kid)) { set.add(l.child); queue.push(l.child); }
             }
+        }
+        /* ⌝ deep-drag on a ZONE carries its spatial contents (operator directive 2026-08-12,
+           #1330): every visible card whose CENTER sits inside the zone rect
+           rides along — geometric membership, no chain links needed. */
+        for (const zid of [...set]) {
+          const z = CARDS.get(zid);
+          if (!z || z.kind !== 'zone') continue;
+          const zp = dispPos(z), zw = cw(z), zh = ch(z);
+          for (const c of CARDS.values()) {
+            if (set.has(c.id) || !visible(c)) continue;
+            const p = dispPos(c), mx = p.x + cw(c) / 2, my = p.y + ch(c) / 2;
+            if (mx > zp.x && mx < zp.x + zw && my > zp.y && my < zp.y + zh) set.add(c.id);
+          }
         }
         dragFree = new Set([...set].filter((cid) => {
           const c = CARDS.get(cid);
@@ -1296,7 +1436,7 @@ vp.addEventListener('pointerup', async (e) => {
     const x1 = (Math.min(down0.x, e.clientX) - V.tx) / V.s, x2 = (Math.max(down0.x, e.clientX) - V.tx) / V.s;
     const y1 = (Math.min(down0.y, e.clientY) - V.ty) / V.s, y2 = (Math.max(down0.y, e.clientY) - V.ty) / V.s;
     for (const c of CARDS.values()) {
-      if (!visible(c)) continue;
+      if (!visible(c) || c.kind === 'zone') continue;   // zones: tap-select only (#1295)
       const p = dispPos(c);
       if (p.x < x2 && p.x + cw(c) > x1 && p.y < y2 && p.y + ch(c) > y1) sel.add(c.id);
     }
@@ -1304,6 +1444,18 @@ vp.addEventListener('pointerup', async (e) => {
     /* uiSync, not render (#958): lasso only changes `sel` — the full rebuild
        (innerHTML + md() over every body) cost ~400ms of highlight lag */
     uiSync(); return;
+  }
+
+  if (m === 'zsize' && ptrs.size === 0) {              // commit zone resize (#1295)
+    const z = zsz; zsz = null;
+    if (z && z.w != null && moved >= 7) {
+      const c = CARDS.get(z.id);
+      if (c) { c.w = z.w; c.h = z.h; }                 // local write-through
+      await act({ action: 'edit', id: z.id, w: z.w, h: z.h });
+      render(); return;
+    }
+    if (moved < 7 && t) tap(t, e);                     // grip tap = plain tap
+    return;
   }
 
   if (wasDrag && ptrs.size === 0) {                    // commit card drag
@@ -1331,7 +1483,8 @@ vp.addEventListener('pointerup', async (e) => {
   if (moved < 7 && t && ptrs.size === 0) tap(t, e);
 });
 vp.addEventListener('pointercancel', (e) => { ptrs.delete(e.pointerId); pinch0 = null;
-  dragIds = null; dragOrig = null; dragPaths = null; dragFree = null; $('band').style.display = 'none';
+  dragIds = null; dragOrig = null; dragPaths = null; dragFree = null; zsz = null;
+  $('band').style.display = 'none';
   if (!ptrs.size) uiSync();  // clear any live band-preview highlights (#958)
 });
 
@@ -1361,6 +1514,15 @@ function tap(t, e) {
   if (link) { openTab(link.href); return; }            // click is capture-retargeted; open here
   const node = t.closest('.node');
   if (!node) {                                         // empty tap: clear selection
+    if (sel.size) { sel.clear(); uiSync(); }
+    return;
+  }
+  /* zones select only from their corners (operator directive 2026-08-12, #1345): a body
+     tap acts like empty space — the rect frames other cards, so stray
+     clicks inside it shouldn't grab the zone. Corner taps (⌜ ⌝ ⌞ ⌟) select;
+     2×tap a corner to edit. */
+  if (node.classList.contains('k-zone')
+      && !(t.closest('.zmove') || t.closest('.zgrip'))) {
     if (sel.size) { sel.clear(); uiSync(); }
     return;
   }
@@ -1408,8 +1570,8 @@ function tap(t, e) {
   const meta = e.shiftKey || e.ctrlKey || e.metaKey;
   if (meta) { sel.has(id) ? sel.delete(id) : sel.add(id); }
   else { sel.clear(); sel.add(id);                   // tap OPENS (operator directive 2026-07-29, #374)
-    const cc = CARDS.get(id);                        // …except headers: nothing to open (#425)
-    if (!cc || cc.kind !== 'header') { expanded.add(id); saveExp(); markSeen([id]); } }
+    const cc = CARDS.get(id);                        // …except headers/zones: nothing to open (#425/#1295)
+    if (!cc || (cc.kind !== 'header' && cc.kind !== 'zone')) { expanded.add(id); saveExp(); markSeen([id]); } }
   uiSync();                                          // fast path: classes + panel only (#681)
   // no revealCard here: tapping a card must NOT adjust the pan (operator directive 2026-07-31, #685)
 }
@@ -1430,6 +1592,7 @@ function openEditor(c, parents) {
   $('ed-url').value = (c && c.url) || '';
   $('ed-imp').value = (c && c.importance) || '';
   $('ed-urg').value = (c && c.urgency) || '';
+  syncColorUI();                               // zone → show picker, primed with the live color (#1326)
   $('edbox').style.display = 'block';
   $('ed-title').focus();
   saveEd();
@@ -1451,6 +1614,26 @@ for (const fid of ['ed-title', 'ed-body', 'ed-url', 'ed-imp', 'ed-urg', 'ed-kind
   $(fid).addEventListener('input', saveEd);
   $(fid).addEventListener('change', saveEd);
 }
+/* ---- zone color picker (operator directive 2026-08-12, #1326): shown only when kind=zone.
+   The color LIVES in the body (a #hex or color word — zoneColor()); picking a
+   color rewrites the body's first #hex, or prepends one. A prepended hex
+   always wins over a color word (zoneColor checks hex first). ---- */
+function syncColorUI() {
+  const isZone = $('ed-kind').value === 'zone';
+  $('ed-colorwrap').style.display = isZone ? '' : 'none';
+  if (isZone) $('ed-color').value = zoneHex6(zoneColor(
+    { id: edCard ? edCard.id : 0, body: $('ed-body').value }));
+}
+$('ed-kind').addEventListener('change', syncColorUI);
+$('ed-body').addEventListener('input', () => {
+  if ($('ed-kind').value === 'zone') syncColorUI(); });
+$('ed-color').addEventListener('input', () => {
+  const ta = $('ed-body'), v = $('ed-color').value;
+  ta.value = /#[0-9a-f]{6}\b|#[0-9a-f]{3}\b/i.test(ta.value)
+    ? ta.value.replace(/#[0-9a-f]{6}\b|#[0-9a-f]{3}\b/i, v)
+    : v + (ta.value.trim() ? '\n' + ta.value : '');
+  saveEd();
+});
 /* paste an image into the body editor (operator directive 2026-08-11, #1168): uploads it to the
    server (→ imgs/<name> on disk, readable by {{AGENT_NAME}}), inserts ![img](/img/<name>)
    at the cursor; the board renders it inline (small in preview, big in panel). */
@@ -1486,6 +1669,7 @@ function restoreEditor() {
   $('ed-url').value = s.url || '';
   $('ed-imp').value = s.imp || '';
   $('ed-urg').value = s.urg || '';
+  syncColorUI();
   saveEd();
   if (s.id != null && !c) toast('⚠ card #' + s.id + ' is gone — restored your text as a new card');
 }
@@ -1509,7 +1693,10 @@ $('ed-save').onclick = async () => {
       for (const pid of edParents) { const pc = CARDS.get(pid); if (!pc) continue;
         const pp = dispPos(pc); if (pp.y > by) { by = pp.y; bx = pp.x; bh = ch(pc); } }
       if (bx != null) { const s = slotBelow(bx, by + bh); p.x = s.x; p.y = s.y; }
-    } else { p.x = (boardW() / 2 - V.tx) / V.s - 120; p.y = (innerHeight / 2 - V.ty) / V.s - 48; }
+    } else {
+      const zw = p.kind === 'zone' ? 280 : 120, zh = p.kind === 'zone' ? 180 : 48;  // half default size (#1295)
+      p.x = (boardW() / 2 - V.tx) / V.s - zw; p.y = (innerHeight / 2 - V.ty) / V.s - zh;
+    }
     r = await act(p);
     if (r) { toast('created #' + r.id); sel.clear(); sel.add(r.id); markSeen([r.id]); }
   }

@@ -66,7 +66,9 @@ try { db.exec('ALTER TABLE ergs ADD COLUMN sid TEXT'); } catch (_) {}  // migrat
 // (one-time migration from its localStorage set), clients keep local behavior.
 db.exec('CREATE TABLE IF NOT EXISTS seen (id INTEGER PRIMARY KEY)');
 
-const KINDS = ['mind', 'memory', 'human', '{{AGENT_NAME}}', 'erg', 'header'];
+const KINDS = ['mind', 'memory', 'human', '{{AGENT_NAME}}', 'erg', 'header', 'zone'];
+// 'zone' (operator directive 2026-08-12, #1295): decorative colored rectangle behind cards —
+// pure organization, no chain semantics; the board paints it under everything.
 // two-kind interface (operator directive 2026-07-29, card #275); aliases for stray callers
 // 'memory' replaces short-term/long-term (operator directive 2026-08-02, card #780)
 const KIND_ALIAS = { input: 'human', output: '{{AGENT_NAME}}', work: '{{AGENT_NAME}}',
