@@ -433,6 +433,7 @@
   <div class="row"><textarea id="ed-body" placeholder="body (markdown)"></textarea></div>
   <div class="row end">
     <button id="ed-cancel">cancel</button>
+    <button id="ed-saverg" class="go" title="save this card, then immediately fire an erg on it">save + ⚡ erg</button>
     <button id="ed-save" class="go">save</button>
   </div>
 </div>
@@ -1687,13 +1688,16 @@ function restoreEditor() {
   if (s.id != null && !c) toast('⚠ card #' + s.id + ' is gone — restored your text as a new card');
 }
 $('ed-cancel').onclick = closeEditor;
-$('ed-save').onclick = async () => {
+/* save (shared by the two buttons): fire=true also spawns an erg on the saved
+   card right away — "save + ⚡ erg" (operator directive 2026-08-13, #153). */
+async function edSaveGo(fire) {
   const title = $('ed-title').value.trim();
   const body = $('ed-body').value, url = $('ed-url').value.trim();
   const imp = $('ed-imp').value ? +$('ed-imp').value : null;
   const urg = $('ed-urg').value ? +$('ed-urg').value : null;
-  let r;
+  let r, cid;
   if (edCard) {
+    cid = edCard.id;
     r = await act({ action: 'edit', id: edCard.id, title, body, url, imp, urg,
       kind: $('ed-kind').value });
     if (r) toast('saved #' + edCard.id);
@@ -1711,12 +1715,20 @@ $('ed-save').onclick = async () => {
       p.x = (boardW() / 2 - V.tx) / V.s - zw; p.y = (innerHeight / 2 - V.ty) / V.s - zh;
     }
     r = await act(p);
-    if (r) { toast('created #' + r.id); sel.clear(); sel.add(r.id); markSeen([r.id]); }
+    if (r) { cid = r.id; toast('created #' + r.id); sel.clear(); sel.add(r.id); markSeen([r.id]); }
   }
   if (!r) return;      // save failed → keep dialog (and its text) open
   closeEditor();
+  if (fire && cid != null) {
+    const re = await act({ action: 'erg', card_ids: [cid] });
+    if (re) toast('⚡ erg spawned on #' + cid + ' (pid ' + re.pid + ')');
+    // erg.js needs ~0.3s to create its ⚙ output card — re-poll on a short fuse (#653)
+    if (re) for (const ms of [400, 1000, 2200]) setTimeout(poll, ms);
+  }
   poll();
-};
+}
+$('ed-save').onclick = () => edSaveGo(false);
+$('ed-saverg').onclick = () => edSaveGo(true);
 
 /* ---- action bar ---- */
 const selCards = () => [...sel].map((id) => CARDS.get(id)).filter(Boolean);
