@@ -142,6 +142,12 @@
   .txt blockquote { margin:.45em 0; padding:2px 10px;
     border-left:3px solid var(--line); color:var(--dim); }
   .txt hr { border:0; border-top:1px solid var(--line); margin:.6em 0; }
+  /* markdown tables (operator directive 2026-08-14, #1538) — open view only (mdFull) */
+  .txt table { border-collapse:collapse; margin:.45em 0; max-width:100%; }
+  .txt th, .txt td { border:1px solid var(--line); padding:2px 8px;
+    text-align:left; vertical-align:top; }
+  .txt th { background:#0d1014; color:var(--ink); }
+  .txt tbody tr:nth-child(even) td { background:#0d101466; }
   /* parent-link chips in the OPEN view — ✕ breaks the link (operator directive 2026-07-29, #408) */
   .plinks { margin-top:5px; display:flex; flex-wrap:wrap; gap:4px; font-size:10.5px; }
   .plinks .pl { background:#0d1014; border:1px solid var(--line); border-radius:6px;
@@ -220,7 +226,13 @@
      band) — select/edit only from the corner grips (#1345); the body acts
      like empty space (pan / ⇧lasso / tap-clears). */
   .node.k-zone { background:none; border:2px solid; border-radius:16px;
-    padding:0; overflow:visible; }
+    padding:0; overflow:visible;
+    /* body is pointer-transparent (operator directive 2026-08-16, #1600): only the corner
+       grips take events, so a zone lying ON TOP of another zone's corner no
+       longer blocks that corner — the click falls through to the grip (or,
+       over nothing, to the board → pan/⇧band/tap-clear, same as before). */
+    pointer-events:none; }
+  .node.k-zone .zgrip, .node.k-zone .zmove { pointer-events:auto; }
   /* title spans the zone's full width (operator directive 2026-08-12, #1326): base 16px is
      just the measuring size — fitZoneTitles() rescales each label after render
      so the text runs edge to edge; color is muted toward the zone color. */
@@ -523,6 +535,19 @@ function mdFull(s) {
       const l = m[1].length;
       out.push('<h' + l + '>' + inlineMd(m[2]) + '</h' + l + '>'); i++; continue; }
     if (/^(-{3,}|\*{3,}|_{3,})$/.test(t)) { flushPara(); closeList(); out.push('<hr>'); i++; continue; }
+    /* GFM table (operator directive 2026-08-14, #1538): header |…| + separator |---|---| + rows */
+    if (t.startsWith('|') && i + 1 < src.length &&
+        /^\|?\s*:?-+:?\s*(\|\s*:?-+:?\s*)+\|?\s*$/.test(src[i + 1].trim())) {
+      flushPara(); closeList();
+      const cells = (ln) => ln.replace(/^\|/, '').replace(/\|\s*$/, '')
+        .split('|').map((c) => inlineMd(c.trim()));
+      const head = cells(t); i += 2; const rows = [];
+      while (i < src.length && src[i].trim().startsWith('|')) { rows.push(cells(src[i].trim())); i++; }
+      out.push('<table><thead><tr>' + head.map((c) => '<th>' + c + '</th>').join('') +
+        '</tr></thead><tbody>' + rows.map((r) => '<tr>' +
+        r.map((c) => '<td>' + c + '</td>').join('') + '</tr>').join('') + '</tbody></table>');
+      continue;
+    }
     if ((m = t.match(/^[-*+]\s+(.*)/))) { flushPara();
       if (list !== 'ul') { closeList(); out.push('<ul>'); list = 'ul'; }
       out.push('<li>' + inlineMd(m[1]) + '</li>'); i++; continue; }
@@ -682,6 +707,7 @@ async function poll() {
 const cw = (c) => c.w || (c.kind === 'zone' ? 560 : 240),
       ch = (c) => c.h || (c.kind === 'zone' ? 360 : 96);   // zone defaults (#1295)
 let posCache = new Map();
+let deriveFrom = new Map();   // positionless card id → parent id its display pos derives from (#1547)
 /* default drop slot for a new/positionless child (operator directive 2026-08-06, #986):
    directly beneath the parent — touching + aligned, exactly like 🗂 stack.
    If the slot is already taken (a sibling stacked there), chain beneath the
@@ -733,6 +759,7 @@ function dispPos(c, depth) {
       /* stack-style default (operator directive 2026-08-06, #986): touching + aligned under
          the lowest parent; siblings chain via slotBelow (was +26x/+70y jitter) */
       p = slotBelow(best.pp.x, best.pp.y + ch(best.par), c.id);
+      deriveFrom.set(c.id, best.par.id);   // shallow-drag live followers need this (#1547)
     }
   }
   posCache.set(c.id, p);
@@ -824,7 +851,7 @@ function render() {
   pendingRender = false;
   for (const id of [...expanded]) if (!sel.has(id)) expanded.delete(id);  // deselected → unexpand
   saveExp();
-  posCache = new Map();
+  posCache = new Map(); deriveFrom = new Map();
   const cards = [...CARDS.values()].filter(visible);
   const pos = new Map();
   for (const c of cards) pos.set(c.id, dispPos(c));
@@ -1299,7 +1326,8 @@ vp.addEventListener('pointerdown', (e) => {
        a body grab falls through to PAN — tap-select/2×tap still work at
        pointerup (moved < 7 → tap()). ⇧ keeps the lasso even over a zone
        (operator directive 2026-08-12, #1334) — zones frame cards, so band-selecting
-       through them must work. */
+       through them must work. (Since #1600 the body is pointer-events:none,
+       so this branch is normally unreachable — kept as a safety net.) */
     else if (node && node.classList.contains('k-zone')
              && !(e.target.closest && e.target.closest('.zmove')))
       mode = e.shiftKey ? 'band' : 'pan';
@@ -1394,6 +1422,24 @@ vp.addEventListener('pointermove', (e) => {
           const c = CARDS.get(cid);
           return !sel.has(cid) && (c.x == null || c.y == null);
         }));
+        dragIds = [...set];
+      } else {
+        /* shallow (left-half) drag: positionless followers used to jump only
+           AFTER release (they re-derive under the moved parent at render) —
+           pull them along LIVE instead (operator directive 2026-08-15, #1547). Follower =
+           visible positionless card whose display pos derives (deriveFrom,
+           transitively) from a dragged card; they ride in dragFree, so the
+           commit never bakes a position on them — auto-follow is preserved. */
+        const set = new Set(dragIds);
+        for (let grew = true; grew;) {
+          grew = false;
+          for (const [cid, pid] of deriveFrom) {
+            if (set.has(cid) || !set.has(pid)) continue;
+            const c = CARDS.get(cid);
+            if (c && visible(c) && (c.x == null || c.y == null)) { set.add(cid); grew = true; }
+          }
+        }
+        dragFree = new Set([...set].filter((cid) => !sel.has(cid)));
         dragIds = [...set];
       }
       // no markSeen: drag doesn't open the panel, so it keeps ✦ new (#904)
@@ -1534,7 +1580,8 @@ function tap(t, e) {
   /* zones select only from their corners (operator directive 2026-08-12, #1345): a body
      tap acts like empty space — the rect frames other cards, so stray
      clicks inside it shouldn't grab the zone. Corner taps (⌜ ⌝ ⌞ ⌟) select;
-     2×tap a corner to edit. */
+     2×tap a corner to edit. (Since #1600 the body is pointer-events:none,
+     so this branch is normally unreachable — kept as a safety net.) */
   if (node.classList.contains('k-zone')
       && !(t.closest('.zmove') || t.closest('.zgrip'))) {
     if (sel.size) { sel.clear(); uiSync(); }
