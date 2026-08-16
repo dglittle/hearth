@@ -15,3 +15,12 @@
 # page key then travels unencrypted).
 #TLS_CERT=/path/to/fullchain.pem
 #TLS_KEY=/path/to/privkey.pem
+#
+# run_in_background contract (erg.js + tools/bg-hook.js): BG_WAIT=1 detaches
+# background Bash jobs so they survive claude's turn-end exit (setsid + markers
+# in tmp/bg/<session>/), and erg.js keeps the erg alive and re-wakes the
+# session with the job's log when it finishes. Off when unset.
+#BG_WAIT=1
+# Optional dials: max wake-ups per erg / max minutes to wait on jobs.
+#BG_MAX_WAKES=5
+#BG_MAX_WAIT_MIN=120

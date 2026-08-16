@@ -53,7 +53,9 @@ const CLAUDE = process.env.ERG_CLAUDE_BIN || CONF.CLAUDE_BIN || 'claude';
 const TEST_MODE = !!process.env.ERG_CLAUDE_BIN;   // stub binary → skip budget probes
 const MODEL = 'claude-fable-5';
 const FALLBACK_MODEL = 'claude-opus-5'; // when fable weekly budget is dry (the operator 2026-07-27)
-const TOOLS = 'Bash,Read,Edit,Write,Glob,Grep,WebFetch,WebSearch,TodoWrite';
+const TOOLS = 'Bash,BashOutput,KillShell,Read,Edit,Write,Glob,Grep,WebFetch,WebSearch,TodoWrite';
+// BashOutput/KillShell added erg 589: bg-contract (card #1608) makes
+// run_in_background real, so in-session monitoring tools must not be denied.
 // Tools the harness advertises but that CANNOT work in an erg: dontAsk mode
 // auto-denies anything outside TOOLS, and claude -p exits at end of turn so
 // monitors/wakeups/crons/subagent orchestration have nothing to fire into.
@@ -64,6 +66,18 @@ const NO_TOOLS = 'Agent,Workflow,ReportFindings,ScheduleWakeup,ToolSearch,' +
   'ExitWorktree,NotebookEdit,PushNotification,RemoteTrigger,SendMessage,' +
   'TaskCreate,TaskGet,TaskList,TaskOutput,TaskStop,TaskUpdate';
 const TIMEOUT_MS = 30 * 60_000;
+
+// ---- run_in_background contract (card #1608, erg 589) ----
+// BG_WAIT=1 in host.conf (or ERG_BG_WAIT=1 env for tests) arms two pieces:
+// (1) tools/bg-hook.js injected via --settings rewrites background commands →
+//     setsid-detached job + markers in tmp/bg/<sid>/, tail-watcher for claude;
+// (2) after a clean claude exit, bgWaitLoop() below polls the markers and
+//     ♨-resumes the session with a wake prompt when a job completes.
+// Dials: BG_MAX_WAKES (default 5) · BG_MAX_WAIT_MIN (default 120).
+const BG_WAIT = (process.env.ERG_BG_WAIT || CONF.BG_WAIT) === '1';
+const BG_DIR = (s) => path.join(HOME, 'tmp', 'bg', s);
+const BG_SETTINGS = JSON.stringify({ hooks: { PreToolUse: [{ matcher: 'Bash',
+  hooks: [{ type: 'command', command: process.execPath + ' ' + path.join(HOME, 'tools', 'bg-hook.js'), timeout: 10 }] }] } });
 
 const log = (m) => { const l = new Date().toISOString() + ' [' + process.pid + '] ' + m; console.log(l); fs.appendFileSync(LOG, l + '\n'); };
 const fmtDur = (ms) => { const s = Math.round(ms / 1000); return s < 60 ? s + 's' : Math.floor(s / 60) + 'm' + String(s % 60).padStart(2, '0') + 's'; };
@@ -389,6 +403,7 @@ function runClaude(args, env) {
     sid = isResume ? resume.sid : crypto.randomUUID();
     const env = { ...baseEnv };
     if (TOKS[tokSlot - 1]) env.CLAUDE_CODE_OAUTH_TOKEN = TOKS[tokSlot - 1];
+    if (BG_WAIT) env.ERG_BG = '1';           // arms tools/bg-hook.js (card #1608)
     const args = ['-p', isResume ? resumePrompt : prompt, '--output-format', 'json',
       '--model', model,
       '--setting-sources', 'user',            // no project source → no CLAUDE.md
@@ -396,6 +411,7 @@ function runClaude(args, env) {
       '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}',
       '--allowedTools', TOOLS, '--disallowedTools', NO_TOOLS, '--permission-mode', 'dontAsk',
       '--system-prompt', isResume ? resume.sys : sysPrompt,
+      ...(BG_WAIT ? ['--settings', BG_SETTINGS] : []),
       ...(isResume ? ['--resume', resume.sid] : ['--session-id', sid])];
     t0 = Date.now(); ran = true;
     // record sid NOW (not just at finalize) so the board's /hud endpoint can
@@ -432,12 +448,98 @@ function runClaude(args, env) {
     res = { result: 'no attempt made: all (token, model) pairs rejected by budget probe [' + skipped.join(', ') + ']' };
     ok = false; sid = sid || 'no-session';
   }
+  // run_in_background contract, piece 2 (card #1608): claude exited cleanly
+  // but detached bg jobs may still run — wait on their markers, then wake the
+  // session. Fully try/caught: any failure falls through to normal finalize.
+  if (ok && BG_WAIT && ran && !STOPPED) {
+    try { ({ r, res } = await bgWaitLoop(sid, model, tokSlot, r, res)); }
+    catch (e) { log('bg-wait failed (ignored): ' + e.message); }
+  }
+
   // sticky token memory
   if (ok && tokSlot !== prefSlot) log('token memory: next ergs start on token ' + tokSlot);
   if (ok) { try { fs.writeFileSync(PREF_FILE, JSON.stringify({ slot: tokSlot, at: new Date().toISOString() }) + '\n'); } catch (_) {} }
   await finalize(ok, res, r, t0, ran, sid, tokSlot, model);
   process.exitCode = ok ? 0 : 1;
 })();
+
+// ---- run_in_background contract: marker scan + wait/wake loop (card #1608) ----
+const pidAlive = (pid) => { try { process.kill(pid, 0); return true; } catch (_) { return false; } };
+function bgJobs(sid) {   // pending jobs = have a .pid, not yet woken about
+  const dir = BG_DIR(sid); let names = [];
+  try { names = fs.readdirSync(dir).filter((f) => f.endsWith('.pid')); } catch (_) { return []; }
+  return names.map((f) => {
+    const n = f.slice(0, -4), p = (ext) => path.join(dir, n + '.' + ext);
+    if (fs.existsSync(p('woke'))) return null;
+    let pid = null, exit = null, cmd = '';
+    try { pid = parseInt(fs.readFileSync(p('pid'), 'utf8'), 10); } catch (_) {}
+    try { exit = fs.readFileSync(p('exit'), 'utf8').trim(); } catch (_) {}
+    try { cmd = fs.readFileSync(p('cmd'), 'utf8').split('\n').slice(4, -3).join('\n'); } catch (_) {}
+    return { n, pid, exit, cmd, log: p('log'), wokePath: p('woke'),
+      done: exit !== null || !pid || !pidAlive(pid) };
+  }).filter(Boolean);
+}
+
+async function bgWaitLoop(sid, model, tokSlot, r, res) {
+  const MAXWAKES = parseInt(CONF.BG_MAX_WAKES || '5', 10);
+  const MAXWAIT = parseInt(CONF.BG_MAX_WAIT_MIN || '120', 10) * 60000;
+  const t0 = Date.now(); let wakes = 0;
+  while (!STOPPED && wakes < MAXWAKES && Date.now() - t0 < MAXWAIT) {
+    const jobs = bgJobs(sid);
+    if (!jobs.length) break;
+    const ready = jobs.filter((j) => j.done);
+    if (!ready.length) {
+      if ((Date.now() - t0) % 60000 < 10000)
+        log('bg-wait: ' + jobs.length + ' job(s) still running (' + fmtDur(Date.now() - t0) + ' waited)');
+      await new Promise((s) => setTimeout(s, 10000));
+      continue;
+    }
+    for (const j of ready) try { fs.writeFileSync(j.wokePath, nowIso()); } catch (_) {}
+    const remaining = jobs.length - ready.length;
+    let wp = '[erg ' + new Date().toISOString().slice(0, 16) + 'Z] ⏰ BACKGROUND TASK' +
+      (ready.length > 1 ? 'S' : '') + ' COMPLETED — the harness kept this erg alive and woke ' +
+      'your session (run_in_background contract, card #1608). You are still erg:' + ERG +
+      ' with output card #' + outCard + ' — fold the results in and finalize it as usual.' +
+      (remaining ? ' ' + remaining + ' background job(s) still running — you will be woken again.'
+                 : ' No other background jobs pending; new ones you start will also wake you.') + '\n';
+    for (const j of ready) {
+      let tail = ''; try { const b = fs.readFileSync(j.log, 'utf8'); tail = b.length > 4000 ? '…' + b.slice(-4000) : b; } catch (_) {}
+      wp += '\n── job ' + j.n + ' — exit ' + (j.exit !== null ? j.exit : '? (process gone, no exit marker — possibly killed)') + '\n' +
+        '- command: ' + j.cmd.trim().slice(0, 300).replace(/\n/g, ' ⏎ ') + '\n' +
+        '- full log: ' + j.log + ' (the old in-session shell id is dead — Read this file instead)\n' +
+        '- log tail:\n```\n' + tail + '\n```\n';
+    }
+    wakes++;
+    log('bg-wake #' + wakes + ': ' + ready.length + ' job(s) done, ' + remaining + ' pending — resuming ' + sid);
+    const env = { ...baseEnv, ERG_BG: '1' };
+    if (TOKS[tokSlot - 1]) env.CLAUDE_CODE_OAUTH_TOKEN = TOKS[tokSlot - 1];
+    const args = ['-p', wp, '--output-format', 'json', '--model', model,
+      '--setting-sources', 'user', '--disable-slash-commands',
+      '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}',
+      '--allowedTools', TOOLS, '--disallowedTools', NO_TOOLS, '--permission-mode', 'dontAsk',
+      '--system-prompt', SYS_USED, '--settings', BG_SETTINGS, '--resume', sid];
+    const r2 = await runClaude(args, env);
+    let res2 = null; try { res2 = JSON.parse(r2.stdout); } catch (_) {}
+    if (!res2 || res2.is_error || r2.status !== 0) {
+      log('bg-wake resume FAILED (jobs stay on disk in ' + BG_DIR(sid) + '): ' +
+        (((res2 && res2.result) || r2.stderr || 'exit ' + r2.status) + '').slice(0, 200));
+      break;
+    }
+    // fold the wake turn's usage/cost into the erg's totals
+    if (res2.total_cost_usd != null) res.total_cost_usd = (res.total_cost_usd || 0) + res2.total_cost_usd;
+    if (res2.usage) {
+      if (!res.usage) res.usage = {};
+      for (const k of ['input_tokens', 'output_tokens', 'cache_read_input_tokens', 'cache_creation_input_tokens'])
+        res.usage[k] = (res.usage[k] || 0) + (res2.usage[k] || 0);
+    }
+    if (res2.num_turns != null) res.num_turns = (res.num_turns || 0) + res2.num_turns;
+    if (res2.result) res.result = res2.result;
+    r = r2;
+  }
+  if (wakes >= MAXWAKES) log('bg-wait: max wakes (' + MAXWAKES + ') reached — remaining jobs orphaned in ' + BG_DIR(sid));
+  else if (Date.now() - t0 >= MAXWAIT) log('bg-wait: max wait reached — jobs still running orphaned in ' + BG_DIR(sid));
+  return { r, res };
+}
 
 // ---- finalize: costs row, erg row + lock release, output card, transcript ----
 async function finalize(ok, res, r, t0, ran, sid, tokSlot = 1, model = MODEL) {
