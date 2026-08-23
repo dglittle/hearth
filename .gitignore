@@ -20,6 +20,9 @@ db/cards.db-wal
 db/cards.db-shm
 tok-pref.json
 web/limits.json
+web/settings.json
+imgs/
+tmp/
 work/
 output/
 

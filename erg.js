@@ -193,6 +193,52 @@ function findResume() {
   return null;
 }
 
+// ---- full-ancestor context (operator directive 2026-08-23, card #1899) ----
+// When web/settings.json has fullAncestors ≠ false (default ON — board gear ⚙
+// toggles it), the fired prompt carries EVERY ancestor of the target card(s)
+// with FULL BODIES — not just `card show`'s 3-level title-only walk. BFS
+// upward over child links, deduped across parents/branches (diamond/cycle
+// safe); nearest generation first. Applies to fresh ergs only — a ♨ resumed
+// session already holds the chain in its transcript.
+function boardSettings() {
+  try { return JSON.parse(fs.readFileSync(path.join(HOME, 'web', 'settings.json'), 'utf8')); }
+  catch (_) { return {}; }
+}
+function ancestorDump(rootIds) {
+  const seen = new Set(rootIds);
+  let level = [...rootIds], depth = 0;
+  const out = [];
+  while (level.length && depth < 100) {
+    depth++;
+    const qs = level.map(() => '?').join(',');
+    let rows = [];
+    try {
+      rows = db.prepare(
+        `SELECT DISTINCT c.id, c.kind, c.status, c.title, c.body, c.created_by, c.created_at
+           FROM links l JOIN cards c ON c.id = l.parent
+          WHERE l.child IN (${qs}) AND l.kind = 'child'
+          ORDER BY c.id`).all(...level);
+    } catch (_) { break; }
+    const next = [];
+    for (const r of rows) {
+      if (seen.has(r.id)) continue;
+      seen.add(r.id); next.push(r.id);
+      out.push({ depth, ...r });
+    }
+    level = next;
+  }
+  if (!out.length) return '';
+  let s = '\n\n── full ancestor context (every ancestor of the target card(s), bodies included; ' +
+    'gear ⚙ on the board toggles this) ──';
+  for (const a of out) {
+    s += '\n\n' + '^'.repeat(a.depth) + ' #' + a.id + ' [' + a.kind + '/' + a.status + '] ' +
+      (a.title || '(untitled)') + '\n  by ' + (a.created_by || '?') + ' at ' + (a.created_at || '?');
+    const body = String(a.body || '').trim();
+    if (body) s += '\n  ---\n' + body;
+  }
+  return s;
+}
+
 // ---- system prompt: mind cards + ready-tips index + harness facts ----
 function buildSystemPrompt() {
   const parts = [];
@@ -356,6 +402,7 @@ function runClaude(args, env) {
     const shown = cardCli(['show', String(p)]);
     prompt += '\n\n── target card #' + p + ' and its chain ──\n' + (shown.status === 0 ? shown.out : '(show failed: ' + shown.err + ')');
   }
+  if (boardSettings().fullAncestors !== false) prompt += ancestorDump(parents);
   if (extra) prompt += '\n\n' + extra;
   const sysPrompt = buildSystemPrompt();
 

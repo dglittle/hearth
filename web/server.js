@@ -136,6 +136,31 @@ function archiveCard(id) {  // status + geometry agree (design §3): archived �
 // (non-archived) parent OUTSIDE the closure is left alone (shared cards don't
 // vanish from other threads); iterated to fixpoint so descendants of a kept
 // card stay with it.
+// Effective y for quadrant tests: own y, else nearest positioned 'child'-
+// ancestor (analog of the board's dispPos derive).
+function effectiveY(id, seen = new Set()) {
+  if (seen.has(id)) return null;
+  seen.add(id);
+  const c = db.prepare('SELECT y FROM cards WHERE id = ?').get(id);
+  if (!c) return null;
+  if (c.y != null) return c.y;
+  for (const r of db.prepare(`SELECT parent AS o FROM links WHERE child = ? AND kind = 'child'`).all(id)) {
+    const y = effectiveY(r.o, seen);
+    if (y != null) return y;
+  }
+  return null;
+}
+// Follow only arrows the human can SEE (operator directive 2026-08-19, #1708): the board
+// hides edges touching archived cards and edges crossing the y=0 axis
+// (interface = lower half, y>0), so traversal stops at archived cards and
+// never leaves the interface half. Positionless cards inherit y via
+// effectiveY; unresolvable → followable. (Board tests center y, we test top y.)
+function followable(oid) {
+  const c = db.prepare('SELECT status FROM cards WHERE id = ?').get(oid);
+  if (!c || c.status === 'archived') return false;
+  const y = effectiveY(oid);
+  return y == null || y > 0;
+}
 function threadClosure(id) {
   const seen = new Set([id]);
   const up = db.prepare(`SELECT parent AS o FROM links WHERE child = ? AND kind = 'child'`);
@@ -144,7 +169,7 @@ function threadClosure(id) {
     const queue = [id];
     while (queue.length)
       for (const r of stmt.all(queue.pop()))
-        if (!seen.has(r.o)) { seen.add(r.o); queue.push(r.o); }
+        if (!seen.has(r.o) && followable(r.o)) { seen.add(r.o); queue.push(r.o); }
   }
   return seen;
 }
@@ -158,8 +183,11 @@ function archiveThread(id) {
     changed = false;
     for (const cid of closure) {
       if (kept.has(cid)) continue;
+      // guard counts only parents whose arrow the human can see (followable);
+      // an invisible parent (archived / outside the interface half) can't
+      // anchor a card in "another thread" the human is looking at (#1708)
       const liveOutside = parentsOf.all(cid).some((p) =>
-        (!closure.has(p.id) || kept.has(p.id)) && p.status !== 'archived');
+        (!closure.has(p.id) || kept.has(p.id)) && followable(p.id));
       if (liveOutside) { kept.add(cid); changed = true; }
     }
   }
@@ -167,6 +195,14 @@ function archiveThread(id) {
   for (const cid of closure)
     if (!kept.has(cid)) { archiveCard(cid); archived.push(cid); }
   return { archived: archived.sort((a, b) => a - b), kept: [...kept].sort((a, b) => a - b) };
+}
+
+// ---- board settings (operator directive 2026-08-23, #1899): tiny json read by erg.js ----
+// fullAncestors (default true) = fired erg prompt carries every ancestor of
+// the target card(s) with full bodies. Board gear ⚙ popover toggles it.
+const SETTINGSF = path.join(__dirname, 'settings.json');
+function readSettings() {
+  try { return JSON.parse(fs.readFileSync(SETTINGSF, 'utf8')); } catch (_) { return {}; }
 }
 
 // ---- /data ----
@@ -201,6 +237,7 @@ function dataState(since) {
   const seenRows = db.prepare('SELECT id FROM seen ORDER BY id').all().map((r) => r.id);
   return { ok: true, ver: pageVer(), full, generated_at: nowIso(), divider: 0,
            cards, ids, links, ergs, warm: warmSessions(), spend,
+           settings: readSettings(),
            seen: seenRows.filter((id) => id !== 0), seenSeeded: seenRows[0] === 0 };
 }
 
@@ -429,6 +466,18 @@ const ACTIONS = {
       log('erg fired on card(s) #' + ids.join(',#') + ' (pid ' + child.pid + ')');
       return { pid: child.pid, card_ids: ids };
     });
+  },
+
+  settings(p) {  // gear ⚙ popover (operator directive 2026-08-23, #1899): merge p.set into
+    // web/settings.json; always returns the current settings object.
+    const s = readSettings();
+    if (p.set && typeof p.set === 'object' && !Array.isArray(p.set)) {
+      Object.assign(s, p.set);
+      fs.writeFileSync(SETTINGSF, JSON.stringify(s, null, 2) + '\n');
+      recordAct('settings', p.set);
+      log('settings updated: ' + JSON.stringify(p.set));
+    }
+    return { settings: s };
   },
 
   'erg-stop'(p) {  // board ⛔: SIGTERM the erg.js process — it kills its claude

@@ -370,6 +370,33 @@ function archiveCard(db, id) {   // status + geometry agree (design §3)
              (slot ? ', x = ?, y = ?' : '') + ' WHERE id = ?')
     .run(...(slot ? [now(), slot.x, slot.y, id] : [now(), id]));
 }
+// Effective y of a card for quadrant tests: own y, else nearest positioned
+// 'child'-ancestor (analog of the board's dispPos derive; board picks the
+// lowest parent, we take the first found — close enough for a half-plane test).
+function effectiveY(db, id, seen = new Set()) {
+  if (seen.has(id)) return null;
+  seen.add(id);
+  const c = db.prepare('SELECT y FROM cards WHERE id = ?').get(id);
+  if (!c) return null;
+  if (c.y != null) return c.y;
+  for (const r of db.prepare(`SELECT parent AS o FROM links WHERE child = ? AND kind = 'child'`).all(id)) {
+    const y = effectiveY(db, r.o, seen);
+    if (y != null) return y;
+  }
+  return null;
+}
+// Follow only arrows the human can SEE on the board (operator directive 2026-08-19, #1708):
+// the board hides edges touching archived cards and edges crossing the y=0
+// axis (interface = lower half, y>0). So traversal stops at archived cards
+// and never steps to a card outside the interface half. Positionless cards
+// inherit y from their chain (effectiveY); unresolvable y → treated followable.
+// (Approximation: board tests card CENTER y>0, we test stored top y>0.)
+function followable(db, oid) {
+  const c = db.prepare('SELECT status FROM cards WHERE id = ?').get(oid);
+  if (!c || c.status === 'archived') return false;
+  const y = effectiveY(db, oid);
+  return y == null || y > 0;
+}
 function threadClosure(db, id) {
   const seen = new Set([id]);
   const up = db.prepare(`SELECT parent AS o FROM links WHERE child = ? AND kind = 'child'`);
@@ -378,7 +405,7 @@ function threadClosure(db, id) {
     const queue = [id];
     while (queue.length)
       for (const r of stmt.all(queue.pop()))
-        if (!seen.has(r.o)) { seen.add(r.o); queue.push(r.o); }
+        if (!seen.has(r.o) && followable(db, r.o)) { seen.add(r.o); queue.push(r.o); }
   }
   return seen;
 }
@@ -392,8 +419,11 @@ function archiveThread(db, id) {
     changed = false;
     for (const cid of closure) {
       if (kept.has(cid)) continue;
+      // guard counts only parents whose arrow the human can see (followable);
+      // an invisible parent (archived / outside the interface half) can't
+      // anchor a card in "another thread" the human is looking at (#1708)
       const liveOutside = parentsOf.all(cid).some(p =>
-        (!closure.has(p.id) || kept.has(p.id)) && p.status !== 'archived');
+        (!closure.has(p.id) || kept.has(p.id)) && followable(db, p.id));
       if (liveOutside) { kept.add(cid); changed = true; }
     }
   }

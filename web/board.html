@@ -31,9 +31,9 @@
   button:active { background:var(--line); }
   button.on { border-color:var(--sel); color:#9ec9ff; }
   #bar button { padding:4px 8px; font-size:11.5px; }
-  #bar button#help { border-radius:50%; padding:0; width:20px; height:20px; line-height:18px;
-    font-size:12px; color:var(--dim); text-align:center; flex-shrink:0; }
-  #bar button#help.on { color:#9ec9ff; }
+  #bar button#help, #bar button#gear { border-radius:50%; padding:0; width:20px; height:20px;
+    line-height:18px; font-size:12px; color:var(--dim); text-align:center; flex-shrink:0; }
+  #bar button#help.on, #bar button#gear.on { color:#9ec9ff; }
   #findn { width:46px; background:#0d1014; color:var(--ink); border:1px solid var(--line);
     border-radius:7px; padding:4px 6px; font-size:11.5px; }
   #findn:focus { outline:none; border-color:var(--sel); }
@@ -55,6 +55,16 @@
   #helpbox .g { display:grid; grid-template-columns:auto 1fr; gap:2px 9px; align-items:baseline; }
   #helpbox .g span:nth-child(odd) { color:var(--ink); white-space:nowrap; }
   #helpbox p { margin:0; line-height:1.45; }
+
+  /* ⚙ settings popover (operator directive 2026-08-23, #1899) — same look as (?) */
+  #gearbox { position:fixed; z-index:30; top:38px; left:8px; width:min(340px,92vw);
+    background:#1b222a; border:1px solid var(--line); border-radius:12px; padding:11px 13px;
+    box-shadow:0 12px 40px #000c; display:none; font-size:11.5px; color:var(--dim); }
+  #gearbox h5 { margin:0 0 7px; font-size:11px; color:#c9a86a; letter-spacing:.05em;
+    text-transform:uppercase; font-weight:600; }
+  #gearbox label { display:flex; gap:8px; align-items:flex-start; cursor:pointer; color:var(--ink); }
+  #gearbox input[type=checkbox] { margin-top:2px; }
+  #gearbox small { display:block; color:var(--dim); line-height:1.4; margin-top:2px; }
 
   /* limits dials (ported from the watch-page — M5 follow-up, card #252).
      Compacted 2026-07-31 (#626): no "limits" word, no % signs, 26px bars —
@@ -266,6 +276,14 @@
   .node.st-done .ttl { color:var(--dim); }
   .node.arch { opacity:.38; }
   .node.sel { outline:2.5px solid var(--sel); outline-offset:2px; opacity:1; }
+  /* find multi-match highlight (operator directive 2026-08-19, #1702): bolder than plain
+     selection — thick gold outline + glow, brief triple pulse to catch the
+     eye (transient: any selection change clears it, so the pulse "ends"). */
+  .node.hit { outline:4px solid #ffd257; outline-offset:3px;
+    box-shadow:0 0 18px 4px rgba(255,210,87,.55); opacity:1;
+    animation:hitpulse 0.9s ease-in-out 3; }
+  @keyframes hitpulse {
+    50% { outline-color:#fff3c4; box-shadow:0 0 30px 10px rgba(255,210,87,.9); } }
   /* fresh = never OPENED in THIS browser (operator directive 2026-07-29, #372 + #381;
      narrowed 2026-08-05, #904): static gold-tinted BACKGROUND + gold border +
      ✦ new badge, until the card is opened in the side panel. Select/drag/lasso
@@ -360,15 +378,18 @@
   <b id="brand" title="{{AGENT_NAME}} — {{PURPOSE}} — tap for more">🪶<span class="nm"> {{AGENT_NAME}}</span></b>
   <button id="fit">fit</button>
   <button id="newcard" title="new card">+</button>
-  <!-- find a card by number (operator directive 2026-07-29, #387): paste "123" or "#123",
-       hit find/Enter → pan+zoom to it, select + open it -->
-  <input id="findn" inputmode="numeric" placeholder="#…">
+  <!-- find (operator directive 2026-07-29 #387 + 2026-08-19 #1697): "123"/"#123" → jump to
+       that card; anything else (or a number with no card) → text search over
+       title+body: one hit = jump, many = zoom-to-fit + highlight them -->
+  <input id="findn" placeholder="#… / text">
   <button id="find">find</button>
   <!-- back to the card/view you were on before the last find (operator directive 2026-07-29, #393) -->
   <button id="back" disabled>back</button>
   <!-- gestures + limits legend live here now (operator directive 2026-07-31, #626) so the
        titlebar fits one row in a half-screen window -->
   <button id="help" title="gestures &amp; legend">?</button>
+  <!-- ⚙ settings (operator directive 2026-08-23, #1899): erg-firing dials -->
+  <button id="gear" title="settings">⚙</button>
   <span id="ergrun"></span>
   <!-- cumulative spend, all ergs ever (operator directive 2026-08-02, #764) -->
   <span id="spend" title="cumulative spend"></span>
@@ -412,6 +433,16 @@
   one probe per 90s). The <b>gold-boxed token</b> is the one the most recent erg ran on;
   new ergs start on the token whose f7d resets soonest (per the last probe), falling
   back to the other on a limit hit.</p>
+</div>
+
+<div id="gearbox">
+  <h5>⚙ settings</h5>
+  <label><input type="checkbox" id="set-fullanc">
+    <span>full ancestor context for ergs
+      <small>a fired erg's prompt carries <b>every</b> ancestor of the target
+      card — full bodies, all generations — instead of the default 3 levels of
+      titles. Richer context per erg, but more (mostly cache-miss) input
+      tokens; turn off if it proves too expensive.</small></span></label>
 </div>
 
 <div id="abar">
@@ -568,6 +599,7 @@ function mdFull(s) {
 const CARDS = new Map();            // id -> card row
 let LINKS = [], ERGS = [], WARM = new Map(), VER = null, since = '';
 const sel = new Set(), expanded = new Set();
+const hits = new Set();             // find multi-match glow (⊆ sel; #1702)
 /* expanded cards persist across reloads (operator directive 2026-07-29, #295): render
    write-throughs the set; boot restores it (re-selecting too, since render
    collapses any expanded card that isn't selected). */
@@ -649,6 +681,7 @@ async function act(p) {
 
 /* ---- poll: full first, then ?since= deltas; reload on ver flip ---- */
 let lastErgsJson = '', lastLinksJson = '', lastWarmJson = '', lastSeenJson = '';
+let SETTINGS = {};                       // board settings (⚙ popover, #1899)
 async function poll() {
   let d;
   try {
@@ -659,6 +692,7 @@ async function poll() {
     ' — open with #k=&lt;key&gt;</p>'; return; }
   if (VER === null) VER = d.ver;
   else if (d.ver !== VER) return location.reload();
+  if (d.settings) SETTINGS = d.settings;   // ⚙ popover reads it on open (#1899)
   const keep = new Set(d.ids);
   let removed = false;
   for (const id of [...CARDS.keys()])
@@ -851,6 +885,8 @@ function render() {
   pendingRender = false;
   for (const id of [...expanded]) if (!sel.has(id)) expanded.delete(id);  // deselected → unexpand
   saveExp();
+  // find multi-match glow rides the selection: any change drops it (#1702)
+  for (const id of [...hits]) if (!sel.has(id)) hits.delete(id);
   posCache = new Map(); deriveFrom = new Map();
   const cards = [...CARDS.values()].filter(visible);
   const pos = new Map();
@@ -909,6 +945,7 @@ function render() {
     const fresh = seen && !seen.has(c.id);
     const cls = ['node', 'k-' + c.kind, 'st-' + c.status,
       c.status === 'archived' ? 'arch' : '', sel.has(c.id) ? 'sel' : '',
+      hits.has(c.id) ? 'hit' : '',
       fresh ? 'fresh' : '',
       expanded.has(c.id) ? 'open' : ''].join(' ');   // open = showing in the side panel (#51)
     if (c.kind === 'header') {           // big-font section title, no chrome (#425)
@@ -1152,9 +1189,12 @@ function uiSync() {
   if (ptrs.size || editorOpen) { pendingRender = true; return; }
   for (const id of [...expanded]) if (!sel.has(id)) expanded.delete(id);  // deselected → unexpand
   saveExp();
+  // find multi-match glow rides the selection: any change drops it (#1702)
+  for (const id of [...hits]) if (!sel.has(id)) hits.delete(id);
   for (const el of world.querySelectorAll('.node')) {
     const id = +el.dataset.id;
     el.classList.toggle('sel', sel.has(id));
+    el.classList.toggle('hit', hits.has(id));
     const open = expanded.has(id);
     el.classList.toggle('open', open);
     if (seen && seen.has(id) && el.classList.contains('fresh')) {  // touched → glow off now
@@ -1990,19 +2030,57 @@ $('brand').onclick = (e) => { e.stopPropagation(); toggleHelp(); };
 document.addEventListener('pointerdown', (e) => {
   if ($('helpbox').style.display === 'block' && !e.target.closest('#helpbox,#help,#brand')) toggleHelp(false);
 });
-/* find a card by number (operator directive 2026-07-29, #387): accepts "123" or "#123";
-   selects + opens the card and centers the view on it */
-function findCard() {
-  const m = $('findn').value.match(/\d+/);
-  if (!m) { toast('paste a card number'); $('findn').focus(); return; }
-  const id = +m[0], c = CARDS.get(id);
-  if (!c) { toast('⚠ no card #' + id + ' on the board'); return; }
+/* ⚙ settings popover (operator directive 2026-08-23, #1899): erg-firing dials, persisted in
+   web/settings.json server-side (erg.js reads it when building a prompt) */
+function toggleGear(on) {
+  const b = $('gearbox');
+  const show = on === undefined ? b.style.display !== 'block' : on;
+  if (show) $('set-fullanc').checked = SETTINGS.fullAncestors !== false;  // default ON
+  b.style.display = show ? 'block' : 'none';
+  $('gear').classList.toggle('on', show);
+}
+$('gear').onclick = (e) => { e.stopPropagation(); toggleGear(); };
+$('set-fullanc').onchange = async () => {
+  const v = $('set-fullanc').checked;
+  const r = await act({ action: 'settings', set: { fullAncestors: v } });
+  if (r) { SETTINGS = r.settings; toast('⚙ erg full-ancestor context ' + (v ? 'ON' : 'OFF')); }
+  else $('set-fullanc').checked = !v;                    // save failed — revert
+};
+document.addEventListener('pointerdown', (e) => {
+  if ($('gearbox').style.display === 'block' && !e.target.closest('#gearbox,#gear')) toggleGear(false);
+});
+/* find (operator directive 2026-07-29 #387; text search operator directive 2026-08-19 #1697):
+   - "123" / "#123" → jump to that card (select + open + center), as ever
+   - anything else, or a number that matches no card → case-insensitive text
+     search over title+body of visible cards: exactly one hit → same jump;
+     several → zoom-to-fit them all + highlight (selection outline) */
+function jumpTo(id) {
+  const c = CARDS.get(id);
   pushBack();                                 // remember where we were (#393)
   sel.clear(); sel.add(id);
   expanded.add(id); saveExp();
   markSeen([id]);
   render();
   centerOn(c);                                // centre in the visible half, readable zoom
+  $('findn').value = ''; $('findn').blur();
+}
+function findCard() {
+  const q = $('findn').value.trim();
+  if (!q) { toast('type a card # or search text'); $('findn').focus(); return; }
+  const m = q.match(/^#?(\d+)$/);              // pure number → the old jump
+  if (m && CARDS.has(+m[1])) return jumpTo(+m[1]);
+  const needle = q.toLowerCase();             // else: text search (also the
+  const found = [...CARDS.values()].filter((c) =>  // number-not-found fallback)
+    visible(c) &&
+    ((c.title || '') + '\n' + (c.body || '')).toLowerCase().includes(needle));
+  if (!found.length) { toast('⚠ no card matches "' + q + '"'); return; }
+  if (found.length === 1) return jumpTo(found[0].id);
+  pushBack();                                 // many: fit + highlight, no panel
+  sel.clear(); hits.clear();
+  for (const c of found) { sel.add(c.id); hits.add(c.id); }  // .hit = bold gold glow (#1702)
+  render();
+  fitTo(found);
+  toast(found.length + ' matches — highlighted');
   $('findn').value = ''; $('findn').blur();
 }
 $('find').onclick = findCard;
