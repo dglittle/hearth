@@ -239,6 +239,43 @@ function ancestorDump(rootIds) {
   return s;
 }
 
+// ---- kb: durable-knowledge repo — optional prompt-visible knowledge base ----
+// If the operator keeps a knowledge base as a git repo (KB_DIR in host.conf,
+// default ~/kb; KB_SUBDIR narrows to one subdirectory of it), then at erg
+// start: guarded ff-only pull (freshness beyond any cron), and an index of its
+// *.md files (H1 + H2 section list per file) rides in the system prompt so
+// every erg knows what the kb holds without reading it. Both pieces are
+// non-fatal: no kb checkout → no section, erg runs fine.
+const KB_DIR = CONF.KB_DIR || path.join(os.homedir(), 'kb');
+const KB_ROOT = path.join(KB_DIR, CONF.KB_SUBDIR || '');
+function kbPull() {
+  if (TEST_MODE) return;                 // stub runs must not touch the network
+  try {
+    if (!fs.existsSync(path.join(KB_DIR, '.git'))) return;
+    const r = spawnSync('git', ['-C', KB_DIR, 'pull', '--ff-only', '--quiet'],
+      { env: { ...process.env, GIT_TERMINAL_PROMPT: '0' }, encoding: 'utf8', timeout: 20000 });
+    if (r.status !== 0) log('kb pull failed (non-fatal): ' + ((r.stderr || '').trim().slice(0, 200) || 'exit ' + r.status));
+  } catch (e) { log('kb pull failed (non-fatal): ' + e.message); }
+}
+function kbIndexSection() {
+  let files = [];
+  try { files = fs.readdirSync(KB_ROOT).filter((f) => f.endsWith('.md') && f !== 'README.md').sort(); }
+  catch (_) { return null; }
+  if (!files.length) return null;
+  const lines = [];
+  for (const f of files) {
+    let txt = '';
+    try { txt = fs.readFileSync(path.join(KB_ROOT, f), 'utf8'); } catch (_) { continue; }
+    const h1 = (txt.match(/^# +(.+?)\s*$/m) || [, f])[1];
+    const h2s = [...txt.matchAll(/^## +(.+?)\s*$/gm)].map((m) => m[1]);
+    lines.push('- ' + f + ' — ' + h1 + (h2s.length ? '\n    § ' + h2s.join(' · ') : ''));
+  }
+  if (!lines.length) return null;
+  return '━━━ knowledge base — ' + KB_ROOT + ' (git; durable facts live HERE, not in memory cards) ━━━\n' +
+    'Read the file before acting on its topic; durable fact learned this erg → edit file + commit+push SAME erg.\n' +
+    lines.join('\n');
+}
+
 // ---- system prompt: mind cards + ready-tips index + harness facts ----
 function buildSystemPrompt() {
   const parts = [];
@@ -262,6 +299,8 @@ function buildSystemPrompt() {
     (mems.map((m) => '#' + m.id +
       ((m.importance || m.urgency) ? ' i' + (m.importance ?? '-') + '·u' + (m.urgency ?? '-') : '') +
       ' ' + m.title).join('\n') || '(no memories)'));
+  const kb = kbIndexSection();
+  if (kb) parts.push(kb);
   const tips = cardCli(['tips']).out;
   parts.push('━━━ tips — the wider board (context only; your work is your target cards) ━━━\n' +
     (tips || '(no tips)'));
@@ -404,6 +443,7 @@ function runClaude(args, env) {
   }
   if (boardSettings().fullAncestors !== false) prompt += ancestorDump(parents);
   if (extra) prompt += '\n\n' + extra;
+  kbPull();                                    // kb freshness (guarded, non-fatal)
   const sysPrompt = buildSystemPrompt();
 
   // warm-session resume candidate (card #756): dialog turn on a live session

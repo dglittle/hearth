@@ -24,3 +24,11 @@
 # Optional dials: max wake-ups per erg / max minutes to wait on jobs.
 #BG_MAX_WAKES=5
 #BG_MAX_WAIT_MIN=120
+#
+# Knowledge base (erg.js kbPull + kbIndexSection): a git repo of durable
+# knowledge, pulled (ff-only, guarded) at erg start; its *.md files' H1 + H2
+# headings are injected into every erg's system prompt as an index. KB_SUBDIR
+# narrows the indexed directory (e.g. one org's subfolder of a mixed repo).
+# No repo at KB_DIR → feature silently off.
+#KB_DIR=/path/to/kb
+#KB_SUBDIR=
