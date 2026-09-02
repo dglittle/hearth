@@ -4,7 +4,13 @@
 //
 // Env: CARDS_DB overrides db path (tests); ERG_ID = this erg's id (lock owner / created_by).
 //
-// Exit codes: 0 ok · 1 usage/not-found error · 2 lock conflict (all-or-nothing refused)
+// Exit codes (one per failure CLASS, so scripts branch on $? not on stderr text — erg 1078,
+// the deploy-CLI pattern: class-coded exits + a hint on every error):
+//   0 ok · 1 unexpected (db/constraint) · 2 usage (bad/missing args, unknown cmd)
+//   3 not found (card/link) · 4 lock conflict (all-or-nothing refused) · 5 policy
+//   (quadrant rule, self-link, duplicate link) · 6 no erg identity (--erg/ERG_ID)
+// --json (any position): exactly ONE JSON value on stdout (errors too: {error,code,message,hint});
+// human text goes to stderr only. Without it, output is the terse text below.
 
 'use strict';
 // suppress the node:sqlite ExperimentalWarning (must be registered before require)
@@ -46,7 +52,23 @@ function openDb() {
   return db;
 }
 
-function die(msg, code = 1) { console.error('card: ' + msg); process.exit(code); }
+const EXIT = { OK: 0, ERROR: 1, USAGE: 2, NOTFOUND: 3, LOCK: 4, POLICY: 5, NOERG: 6 };
+const EXIT_NAME = Object.fromEntries(Object.entries(EXIT).map(([k, v]) => [v, k.toLowerCase()]));
+const JSON_MODE = process.argv.slice(2).includes('--json');
+
+// die(msg, code, hint?, extra?) — text: 'card: msg' (+ '  hint: …') on stderr;
+// json: {error:<class>, code, message, hint?, ...extra} on stdout. Same exit code either way.
+function die(msg, code = EXIT.ERROR, hint, extra) {
+  console.error('card: ' + msg + (hint ? `\n  hint: ${hint}` : ''));
+  if (JSON_MODE) console.log(JSON.stringify({ error: EXIT_NAME[code] || 'error', code, message: msg,
+    ...(hint ? { hint } : {}), ...(extra || {}) }));
+  process.exit(code);
+}
+// emit(payload, lines) — json: one JSON value; text: the given lines (string or array)
+function emit(payload, lines) {
+  if (JSON_MODE) return console.log(JSON.stringify(payload));
+  for (const l of [].concat(lines)) console.log(l);
+}
 
 // --- tiny arg parser: positionals + --flag [value]; repeatable: --parent/--ref ---
 function parseArgs(argv) {
@@ -64,7 +86,7 @@ function parseArgs(argv) {
 }
 function intArg(v, name) {
   const n = parseInt(v, 10);
-  if (!Number.isInteger(n)) die(`${name} needs an integer, got ${JSON.stringify(v)}`);
+  if (!Number.isInteger(n)) die(`${name} needs an integer, got ${JSON.stringify(v)}`, EXIT.USAGE);
   return n;
 }
 function readBody(v) { return v === '-' ? fs.readFileSync(0, 'utf8') : String(v); }
@@ -75,7 +97,7 @@ function whoami(flags) {
 }
 function ergId(flags) {
   const v = flags.erg !== undefined ? flags.erg : process.env.ERG_ID;
-  if (v === undefined) die('need --erg <id> or ERG_ID env');
+  if (v === undefined) die('need --erg <id> or ERG_ID env', EXIT.NOERG, 'inside an erg ERG_ID is exported; by hand pass --erg <id>');
   return intArg(v, '--erg/ERG_ID');
 }
 
@@ -103,75 +125,76 @@ const TIPS_SQL = `
 /* interface area (the WHOLE lower half: y>0) is reserved for human/{{AGENT_NAME}}
    cards — the mind-card rule. Guard added erg 14 after short-term #57 was
    created with --x 400 --y 1930 and leaked into the operator's interface; widened
-   from the lower-right quadrant to the lower half to match the board (operator
-   directive 2026-08-05, #960 — board.html moved in 8b7bbe0, this guard lagged).
+   from the lower-right quadrant to the lower half to match the board (the operator
+   2026-08-05, #960 — board.html moved in 8b7bbe0, this guard lagged).
    header is exempt (labels go anywhere). Non-numeric/cleared coords pass. */
 function guardQuadrant(kind, x, y) {
   if (kind === 'human' || kind === '{{AGENT_NAME}}' || kind === 'header' || kind === 'zone') return;  // zones decorate anywhere (#1295)
   const ny = Number(y);
   if (Number.isFinite(ny) && ny > 0)
-    die(`a ${kind} card may not be placed in the interface half (y>0 is for human/{{AGENT_NAME}} cards) — omit coords or use --x none --y none for auto-placement`);
+    die(`a ${kind} card may not be placed in the interface half (y>0 is for human/{{AGENT_NAME}} cards)`, EXIT.POLICY,
+      'omit coords or use --x none --y none for auto-placement');
 }
 
 function getCard(db, id) {
   const c = db.prepare('SELECT * FROM cards WHERE id = ?').get(id);
-  if (!c) die(`no card #${id}`);
+  if (!c) die(`no card #${id}`, EXIT.NOTFOUND, 'ids never recycle — the card was deleted or never existed; try: card search <title words>');
   return c;
 }
 
 // ---------------------------------------------------------------- commands ---
 const commands = {
 
-  init() { openDb(); console.log('db ready: ' + DB_PATH); },
+  init() { openDb(); emit({ db: DB_PATH }, 'db ready: ' + DB_PATH); },
 
   tips() {
     const db = openDb();
-    reap(db, true);
+    reap(db);
     const rows = db.prepare(TIPS_SQL).all();
-    if (!rows.length) return console.log('(no ready tips)');
-    for (const c of rows) console.log(line(c));
+    emit(rows, rows.length ? rows.map(line) : '(no ready tips)');
   },
 
   show({ pos }) {
     const db = openDb();
     const id = intArg(pos[0], 'id');
     const c = getCard(db, id);
-    console.log(line(c));
-    console.log(`  by ${c.created_by} at ${c.created_at} · updated ${c.updated_at}` +
-      (c.url ? `\n  url: ${c.url}` : ''));
-    if (c.body) console.log('  ---\n' + String(c.body).replace(/^/gm, '  '));
+    const out = [line(c),
+      `  by ${c.created_by} at ${c.created_at} · updated ${c.updated_at}` + (c.url ? `\n  url: ${c.url}` : '')];
+    if (c.body) out.push('  ---\n' + String(c.body).replace(/^/gm, '  '));
     // parent chain, depth 3, 'child' links only; seen-set dedupes across
     // branches/levels (diamonds, shortcut links, cycles)
+    const parents = [];  // {depth, ...card}
     let level = [id];
     const seen = new Set(level);
     for (let d = 1; d <= 3 && level.length; d++) {
       const qs = level.map(() => '?').join(',');
-      const parents = db.prepare(
+      const found = db.prepare(
         `SELECT DISTINCT p.* FROM links l JOIN cards p ON p.id = l.parent
          WHERE l.child IN (${qs}) AND l.kind = 'child'`).all(...level)
         .filter(p => !seen.has(p.id));
-      for (const p of parents) { seen.add(p.id); console.log(`  ${'^'.repeat(d)} ${line(p)}`); }
-      level = parents.map(p => p.id);
+      for (const p of found) { seen.add(p.id); parents.push({ depth: d, ...p }); out.push(`  ${'^'.repeat(d)} ${line(p)}`); }
+      level = found.map(p => p.id);
     }
     const refs = db.prepare(
       `SELECT p.* FROM links l JOIN cards p ON p.id = l.parent
        WHERE l.child = ? AND l.kind = 'ref'`).all(id);
-    for (const r of refs) console.log(`  ~ref~ ${line(r)}`);
+    for (const r of refs) out.push(`  ~ref~ ${line(r)}`);
     const kids = db.prepare(
-      `SELECT ch.*, l.kind AS lkind FROM links l JOIN cards ch ON ch.id = l.child
+      `SELECT ch.*, l.kind AS link FROM links l JOIN cards ch ON ch.id = l.child
        WHERE l.parent = ?`).all(id);
-    for (const k of kids) console.log(`  ${k.lkind === 'ref' ? '~>' : '->'} ${line(k)}`);
+    for (const k of kids) out.push(`  ${k.link === 'ref' ? '~>' : '->'} ${line(k)}`);
+    emit({ card: c, parents, refs, children: kids }, out);
   },
 
   create({ flags }) {
     const db = openDb();
     let kind = String(flags.kind || '');
     kind = KIND_ALIAS[kind] || kind;
-    if (!KINDS.includes(kind)) die(`--kind must be one of: ${KINDS.join(' ')}`);
+    if (!KINDS.includes(kind)) die(`--kind must be one of: ${KINDS.join(' ')}`, EXIT.USAGE);
     guardQuadrant(kind, flags.x, flags.y);
     const title = (flags.title === undefined || flags.title === true) ? '' : String(flags.title);
     const status = flags.status ? normStatus(String(flags.status)) : 'draft';
-    if (!STATUSES.includes(status)) die(`--status must be one of: ${STATUSES.join(' ')}`);
+    if (!STATUSES.includes(status)) die(`--status must be one of: ${STATUSES.join(' ')}`, EXIT.USAGE);
     const t = now();
     db.exec('BEGIN IMMEDIATE');
     try {
@@ -191,8 +214,9 @@ const commands = {
       for (const p of flags.parent) link.run(p, id, 'child');
       for (const p of flags.ref) link.run(p, id, 'ref');
       db.exec('COMMIT');
-      console.log(`created #${id}`);
-    } catch (e) { db.exec('ROLLBACK'); die(e.message); }
+      emit({ id }, `created #${id}`);
+    } catch (e) { db.exec('ROLLBACK'); die(e.message, /FOREIGN KEY/.test(e.message) ? EXIT.NOTFOUND : EXIT.ERROR,
+      /FOREIGN KEY/.test(e.message) ? 'a --parent/--ref id does not exist' : undefined); }
   },
 
   edit({ pos, flags }) {
@@ -214,49 +238,53 @@ const commands = {
     const coord = (v, name) => (v === 'none' || v === 'null') ? null : intArg(v, name);
     if (flags.x !== undefined) { sets.push('x = ?'); vals.push(coord(flags.x, '--x')); }
     if (flags.y !== undefined) { sets.push('y = ?'); vals.push(coord(flags.y, '--y')); }
-    if (!sets.length) die('nothing to edit (--title/--body/--url/--imp/--urg/--x/--y)');
+    if (!sets.length) die('nothing to edit (--title/--body/--url/--imp/--urg/--x/--y)', EXIT.USAGE);
+    const fields = sets.map(s => s.split(' ')[0]);
     sets.push('updated_at = ?'); vals.push(now(), id);
     db.prepare(`UPDATE cards SET ${sets.join(', ')} WHERE id = ?`).run(...vals);
-    console.log(`edited #${id}`);
+    emit({ id, fields }, `edited #${id}`);
   },
 
   status({ pos }) {
     const db = openDb();
     const id = intArg(pos[0], 'id');
     const st = normStatus(String(pos[1] || ''));
-    if (!STATUSES.includes(st)) die(`status must be one of: ${STATUSES.join(' ')}`);
+    if (!STATUSES.includes(st)) die(`status must be one of: ${STATUSES.join(' ')}`, EXIT.USAGE);
     getCard(db, id);
     if (st === 'archived') archiveCard(db, id);  // status + geometry agree (design §3)
     else db.prepare('UPDATE cards SET status = ?, updated_at = ? WHERE id = ?').run(st, now(), id);
-    console.log(`#${id} -> ${st}`);
+    emit({ id, status: st }, `#${id} -> ${st}`);
   },
 
   link({ pos, flags }) {
     const db = openDb();
     const [p, c] = [intArg(pos[0], 'parent'), intArg(pos[1], 'child')];
     const kind = flags.kind ? String(flags.kind) : 'child';
-    if (!['child', 'ref'].includes(kind)) die('--kind must be child|ref');
+    if (!['child', 'ref'].includes(kind)) die('--kind must be child|ref', EXIT.USAGE);
     getCard(db, p); getCard(db, c);
-    if (p === c) die('cannot link a card to itself');
+    if (p === c) die('cannot link a card to itself', EXIT.POLICY);
     try { db.prepare('INSERT INTO links(parent,child,kind) VALUES(?,?,?)').run(p, c, kind); }
-    catch (e) { die(e.message); }
-    console.log(`linked #${p} -${kind}-> #${c}`);
+    catch (e) {
+      if (/UNIQUE|PRIMARY KEY/.test(e.message)) die(`link #${p} -> #${c} already exists`, EXIT.POLICY, 'card unlink first to change its kind');
+      die(e.message);
+    }
+    emit({ parent: p, child: c, kind }, `linked #${p} -${kind}-> #${c}`);
   },
 
   unlink({ pos }) {
     const db = openDb();
     const [p, c] = [intArg(pos[0], 'parent'), intArg(pos[1], 'child')];
     const r = db.prepare('DELETE FROM links WHERE parent = ? AND child = ?').run(p, c);
-    if (!r.changes) die(`no link #${p} -> #${c}`);
-    console.log(`unlinked #${p} -> #${c}`);
+    if (!r.changes) die(`no link #${p} -> #${c}`, EXIT.NOTFOUND, `card show ${c} lists its parents`);
+    emit({ parent: p, child: c }, `unlinked #${p} -> #${c}`);
   },
 
-  // atomic all-or-nothing advisory lock (design §2) — exit 2 on any conflict
+  // atomic all-or-nothing advisory lock (design §2) — exit 4 (EXIT.LOCK) on any conflict
   lock({ pos, flags }) {
     const db = openDb();
     const erg = ergId(flags);
     const ids = pos.map(v => intArg(v, 'id'));
-    if (!ids.length) die('lock <id...>');
+    if (!ids.length) die('lock <id...>', EXIT.USAGE);
     const qs = ids.map(() => '?').join(',');
     db.exec('BEGIN IMMEDIATE');
     const r = db.prepare(
@@ -270,10 +298,13 @@ const commands = {
         `SELECT COUNT(*) n FROM cards WHERE id IN (${qs})`).get(...ids).n;
       die(`lock refused (all-or-nothing): ` +
         (held.length ? `held: ${held.map(h => `#${h.id} by erg:${h.lock_erg}`).join(', ')}` : '') +
-        (missing ? ` ${missing} id(s) not found` : ''), 2);
+        (missing ? ` ${missing} id(s) not found` : ''),
+        EXIT.LOCK,
+        held.length ? 'wait for that erg to end (locks auto-release on exit; `card reap` clears dead ones)' : 'check the ids',
+        { held: held.map(h => ({ id: h.id, erg: h.lock_erg })), missing });
     }
     db.exec('COMMIT');
-    console.log(`locked ${ids.map(i => '#' + i).join(' ')} for erg:${erg}`);
+    emit({ locked: ids, erg }, `locked ${ids.map(i => '#' + i).join(' ')} for erg:${erg}`);
   },
 
   unlock({ pos, flags }) {
@@ -288,18 +319,17 @@ const commands = {
     } else {  // release all leftovers held by this erg
       r = db.prepare('UPDATE cards SET lock_erg = NULL, lock_at = NULL, updated_at = ? WHERE lock_erg = ?').run(now(), erg);
     }
-    console.log(`unlocked ${r.changes} card(s) for erg:${erg}`);
+    emit({ unlocked: r.changes, erg }, `unlocked ${r.changes} card(s) for erg:${erg}`);
   },
 
   search({ pos }) {
     const db = openDb();
     const pat = pos[0];
-    if (!pat) die('search <regex>');
+    if (!pat) die('search <regex>', EXIT.USAGE);
     const rows = db.prepare(
       `SELECT * FROM cards WHERE title REGEXP ? OR body REGEXP ? ORDER BY updated_at DESC LIMIT 50`)
       .all(pat, pat);
-    if (!rows.length) return console.log('(no matches)');
-    for (const c of rows) console.log(line(c));
+    emit(rows, rows.length ? rows.map(line) : '(no matches)');
   },
 
   // archive a whole thread (design §3, spec frozen erg 135; same logic as web/server.js)
@@ -311,38 +341,43 @@ const commands = {
     try {
       const r = archiveThread(db, id);
       db.exec('COMMIT');
-      console.log(`archived ${r.archived.length}: ${r.archived.map(i => '#' + i).join(' ') || '(none)'}`);
-      if (r.kept.length) console.log(`kept (live parent outside thread): ${r.kept.map(i => '#' + i).join(' ')}`);
+      const lines = [`archived ${r.archived.length}: ${r.archived.map(i => '#' + i).join(' ') || '(none)'}`];
+      if (r.kept.length) lines.push(`kept (live parent outside thread): ${r.kept.map(i => '#' + i).join(' ')}`);
+      emit(r, lines);
     } catch (e) { db.exec('ROLLBACK'); die(e.message); }
   },
 
-  reap() { const db = openDb(); reap(db, false); },
+  reap() {
+    const db = openDb();
+    const reaped = reap(db);
+    emit({ reaped }, reaped.length ? reaped.map(h => `reaped lock on #${h.id} (erg:${h.erg} ${h.reason})`) : 'nothing to reap');
+  },
 
   // --- erg lifecycle (used by erg.js in M3; here for lock ownership + tests) ---
   'erg-start'({ flags }) {
     const db = openDb();
     const mode = flags.target !== undefined ? 'targeted' : String(flags.mode || 'generic');
-    if (!['generic', 'targeted'].includes(mode)) die('--mode generic|targeted');
+    if (!['generic', 'targeted'].includes(mode)) die('--mode generic|targeted', EXIT.USAGE);
     const r = db.prepare(
       'INSERT INTO ergs(mode,target_card,pid,status,started_at) VALUES(?,?,?,?,?)').run(
       mode,
       flags.target !== undefined ? intArg(flags.target, '--target') : null,
       flags.pid !== undefined ? intArg(flags.pid, '--pid') : process.ppid,
       'running', now());
-    console.log(String(r.lastInsertRowid));   // bare id — capture with $(...)
+    emit({ id: Number(r.lastInsertRowid), mode }, String(r.lastInsertRowid));   // bare id — capture with $(...)
   },
 
   'erg-end'({ pos, flags }) {
     const db = openDb();
     const id = intArg(pos[0], 'erg id');
     const st = String(flags.status || 'done');
-    if (!['done', 'failed'].includes(st)) die('--status done|failed');
+    if (!['done', 'failed'].includes(st)) die('--status done|failed', EXIT.USAGE);
     db.exec('BEGIN IMMEDIATE');
     db.prepare('UPDATE ergs SET status = ?, ended_at = ?, result = ? WHERE id = ?')
       .run(st, now(), flags.result !== undefined ? String(flags.result) : null, id);
     const r = db.prepare('UPDATE cards SET lock_erg = NULL, lock_at = NULL, updated_at = ? WHERE lock_erg = ?').run(now(), id);
     db.exec('COMMIT');
-    console.log(`erg:${id} ${st}; released ${r.changes} lock(s)`);
+    emit({ erg: id, status: st, released: r.changes }, `erg:${id} ${st}; released ${r.changes} lock(s)`);
   },
 };
 
@@ -434,14 +469,16 @@ function archiveThread(db, id) {
 }
 
 // clear locks whose erg pid is dead or lock_at stale; mark those ergs failed (design §2)
-function reap(db, quiet) {
+// returns [{id, erg, reason}] — silent; the `reap` command prints
+function reap(db) {
   const held = db.prepare(
     `SELECT c.id, c.lock_erg, c.lock_at, e.pid, e.status FROM cards c
      LEFT JOIN ergs e ON e.id = c.lock_erg WHERE c.lock_erg IS NOT NULL`).all();
   const cutoff = new Date(Date.now() - STALE_LOCK_MIN * 60 * 1000).toISOString();
-  let n = 0;
+  const reaped = [];
   for (const h of held) {
-    const stale = (h.lock_at && h.lock_at < cutoff) || !pidAlive(h.pid);
+    const dead = !pidAlive(h.pid);
+    const stale = (h.lock_at && h.lock_at < cutoff) || dead;
     if (!stale) continue;
     db.exec('BEGIN IMMEDIATE');
     db.prepare('UPDATE cards SET lock_erg = NULL, lock_at = NULL, updated_at = ? WHERE id = ? AND lock_erg = ?')
@@ -449,10 +486,9 @@ function reap(db, quiet) {
     db.prepare(`UPDATE ergs SET status = 'failed', ended_at = COALESCE(ended_at, ?)
                 WHERE id = ? AND status = 'running'`).run(now(), h.lock_erg);
     db.exec('COMMIT');
-    n++;
-    if (!quiet) console.log(`reaped lock on #${h.id} (erg:${h.lock_erg} ${!pidAlive(h.pid) ? 'pid dead' : 'stale'})`);
+    reaped.push({ id: h.id, erg: h.lock_erg, reason: dead ? 'pid dead' : 'stale' });
   }
-  if (!quiet && !n) console.log('nothing to reap');
+  return reaped;
 }
 
 // ------------------------------------------------------------------- main ---
@@ -466,14 +502,22 @@ const HELP = `card — sqlite card-board CLI (db: ${DB_PATH})
   card status <id> draft|done|archived        ('draft' = live; 'ready' retired, accepted as alias)
   card link <parent> <child> [--kind child|ref] · card unlink <parent> <child>
   card archive-thread <id>  archive ancestors+descendants (shared live cards kept) + grid move
-  card lock <id...>        atomic all-or-nothing; needs ERG_ID env or --erg (exit 2 = conflict)
+  card lock <id...>        atomic all-or-nothing; needs ERG_ID env or --erg (exit 4 = conflict)
   card unlock [id...]      no ids = release everything this erg holds
   card search <regex>      case-insensitive over title+body
   card reap                clear locks of dead/stale ergs
   card erg-start [--mode generic|targeted] [--target id] [--pid N]   -> prints erg id
-  card erg-end <erg-id> [--status done|failed] [--result "..."]`;
+  card erg-end <erg-id> [--status done|failed] [--result "..."]
+  --json (any command)     exactly one JSON value on stdout (show → {card,parents,refs,children};
+                           tips/search → [cards]; create → {id}; errors → {error,code,message,hint})
+  exit codes: 0 ok · 1 unexpected · 2 usage · 3 not found · 4 lock held · 5 policy · 6 no ERG_ID/--erg`;
 
-const [cmd, ...rest] = process.argv.slice(2);
+const [cmd, ...rest] = process.argv.slice(2).filter(a => a !== '--json');
 if (!cmd || cmd === 'help' || cmd === '--help') { console.log(HELP); process.exit(0); }
-if (!commands[cmd]) die(`unknown command '${cmd}' — try: card help`);
-commands[cmd](parseArgs(rest));
+if (!commands[cmd]) die(`unknown command '${cmd}'`, EXIT.USAGE, 'card help');
+// anything a command didn't classify still exits with a class, not a stack trace
+try { commands[cmd](parseArgs(rest)); }
+catch (e) {
+  if (/FOREIGN KEY/.test(e.message)) die(e.message, EXIT.NOTFOUND, 'a referenced card or erg id does not exist (erg ids come from `card erg-start`)');
+  die(e.message, EXIT.ERROR);
+}

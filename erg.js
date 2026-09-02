@@ -8,7 +8,7 @@
 // erg↔card model (operator directive 2026-07-28 12:47Z + 13:01Z):
 //   - Every erg is fired ON one or more parent cards (`--card N [--card M …]`).
 //     There is NO generic no-target mode.
-//   - erg.js locks all parent cards atomically (exit 2 if another erg holds
+//   - erg.js locks all parent cards atomically (exit 4 if another erg holds
 //     any), then creates ONE output card as child of ALL parents, and tells
 //     the session "card #K is yours". No separate in-flight info card — the
 //     output card IS the live indicator.
@@ -125,7 +125,7 @@ const startRes = cardCli(['erg-start', '--mode', 'targeted', '--target', String(
 const ERG = parseInt(startRes.out, 10);
 if (!Number.isInteger(ERG)) { console.error('erg.js: erg-start failed: ' + startRes.err); process.exit(1); }
 
-// 4. lock ALL parents atomically (all-or-nothing; exit 2 = another erg holds one)
+// 4. lock ALL parents atomically (all-or-nothing; exit 4 = another erg holds one)
 {
   const r = cardCli(['lock', ...parents.map(String), '--erg', String(ERG)]);
   if (r.status !== 0) {
