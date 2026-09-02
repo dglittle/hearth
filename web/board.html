@@ -242,6 +242,17 @@
     color:#e8c15a; letter-spacing:.05em; text-transform:uppercase; white-space:nowrap; }
   .node.k-header.fresh { background:none; border-color:transparent; }
   .node.k-header.arch { opacity:.25; }
+  /* chain-top labels (operator directive 2026-09-02, #71): every live card with NO live
+     parent (a chain top / orphan) gets a small header-style label floating just
+     above its box — a mini .httl built from the SHORT title (hdrText: cut at
+     the first ' — ' / ' (' / ';' / '·' / '|', then at ':' if still long).
+     Painted as a sibling of the node (not inside — nodes clip overflow), sized
+     to the card width, pointer-transparent so drags/taps fall through. */
+  .chdr { position:absolute; height:42px; padding:0 4px; overflow:hidden; pointer-events:none;
+    font:800 34px/42px -apple-system,"Segoe UI",Helvetica,sans-serif; color:#e8c15a;
+    letter-spacing:.05em; text-transform:uppercase; white-space:nowrap; text-overflow:ellipsis; }
+  /* ↑ same scale as .httl header cards (operator directive 2026-09-02, #73: "like header #53 over
+     card #54"); may run up to 2× the card width before ellipsizing (set in render) */
   /* decorative zones (operator directive 2026-08-12, #1295): big translucent colored
      rectangles painted BEHIND everything (first in the DOM, before the svg) —
      an organizational tool, no chain semantics. Color comes from the card
@@ -918,6 +929,32 @@ function fitZoneTitles(one) {
    stall = the scroll jerkiness). Cap the md() source by what the card could
    possibly display (~area/6 chars, floor 2000); the side panel + editor still
    show the full body. */
+/* chain-top label text (operator directive 2026-09-02, #71): the "first part" of a title.
+   Cut at the earliest of ':' / ' — ' / ' – ' / ' (' / ';' / ' · ' / ' | ' / '…'
+   ("TRACKER: M invoice watch — $…" → "TRACKER"; "⏱ session thread — no open…" →
+   "⏱ session thread"); hard-cap at HDR_MAX on a word boundary with an
+   ellipsis (labels are header-sized now, #73 — keep them short). Empty
+   title → no label. */
+const HDR_MAX = 24;
+function hdrText(t) {
+  t = (t || '').trim();
+  if (!t) return '';
+  let cut = t.length;
+  for (const d of [':', ' — ', ' – ', ' (', ';', ' · ', ' | ', '…']) {
+    const i = t.indexOf(d); if (i > 0 && i < cut) cut = i; }
+  t = t.slice(0, cut).trim();
+  if (t.length > HDR_MAX) {
+    const s = t.slice(0, HDR_MAX), sp = s.lastIndexOf(' ');
+    t = (sp > HDR_MAX / 2 ? s.slice(0, sp) : s).trim() + '…'; }
+  return t;
+}
+/* chain top = a live card with no LIVE child-kind parent (refs don't count;
+   all-archived parents = orphan, same rule dispPos uses for placement) */
+function isChainTop(c) {
+  if (c.kind === 'header' || c.kind === 'zone') return false;
+  return !LINKS.some((l) => l.kind === 'child' && l.child === c.id &&
+    (CARDS.get(l.parent) || {}).status && CARDS.get(l.parent).status !== 'archived');
+}
 function mdPreview(c) {
   const cap = Math.max(1500, (cw(c) * ch(c) / 12) | 0);   // ≈5× the glyphs a card that size can show
   return c.body.length > cap
@@ -1007,6 +1044,10 @@ function render() {
     const isChip = false;                        // chips retired (operator directive 2026-08-02 #786: memories render full-size like every card)
     const tsTip = 'created ' + fmtTsFull(c.created_at) + ' by ' + c.created_by +
       (c.updated_at !== c.created_at ? ' · updated ' + fmtTsFull(c.updated_at) : '');
+    /* chain-top label floats just above the box (operator directive 2026-09-02, #71) */
+    const hd = isChainTop(c) ? hdrText(c.title) : '';
+    if (hd) html += `<div class="chdr" data-for="${c.id}"
+        style="left:${p.x}px;top:${p.y - 42}px;max-width:${cw(c) * 2}px">${esc(hd)}</div>`;
     html += `<div class="${cls}" data-id="${c.id}"
         style="left:${p.x}px;top:${p.y}px;width:${cw(c)}px;height:${isChip ? 34 : ch(c)}px">
       <div class="top"><span>#${c.id}</span>${fresh ? '<span class="nb">✦ new</span>' : ''}${wb}<span class="st" style="color:${stColor[c.status]}">${stGlyph[c.status]}</span><span>${esc(c.kind)}${iu}${lk}</span><span class="ts" title="${esc(tsTip)}">${esc(fmtTsShort(c.created_at))}</span></div>
