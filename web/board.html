@@ -477,6 +477,10 @@
       card — full bodies, all generations — instead of the default 3 levels of
       titles. Richer context per erg, but more (mostly cache-miss) input
       tokens; turn off if it proves too expensive.</small></span></label>
+  <label><input type="checkbox" id="set-chdr">
+    <span>chain-top labels
+      <small>every live card with no live parent wears a header-style gold
+      title above its box (short title, 24 chars). Off = plain boxes.</small></span></label>
 </div>
 
 <div id="abar">
@@ -1045,7 +1049,7 @@ function render() {
     const tsTip = 'created ' + fmtTsFull(c.created_at) + ' by ' + c.created_by +
       (c.updated_at !== c.created_at ? ' · updated ' + fmtTsFull(c.updated_at) : '');
     /* chain-top label floats just above the box (operator directive 2026-09-02, #71) */
-    const hd = isChainTop(c) ? hdrText(c.title) : '';
+    const hd = SETTINGS.chainLabels !== false && isChainTop(c) ? hdrText(c.title) : '';   // ⚙ gate
     if (hd) html += `<div class="chdr" data-for="${c.id}"
         style="left:${p.x}px;top:${p.y - 42}px;max-width:${cw(c) * 2}px">${esc(hd)}</div>`;
     html += `<div class="${cls}" data-id="${c.id}"
@@ -2417,6 +2421,7 @@ function toggleGear(on) {
   const b = $('gearbox');
   const show = on === undefined ? b.style.display !== 'block' : on;
   if (show) $('set-fullanc').checked = SETTINGS.fullAncestors !== false;  // default ON
+  if (show) $('set-chdr').checked = SETTINGS.chainLabels !== false;         // default ON
   b.style.display = show ? 'block' : 'none';
   $('gear').classList.toggle('on', show);
 }
@@ -2426,6 +2431,14 @@ $('set-fullanc').onchange = async () => {
   const r = await act({ action: 'settings', set: { fullAncestors: v } });
   if (r) { SETTINGS = r.settings; toast('⚙ erg full-ancestor context ' + (v ? 'ON' : 'OFF')); }
   else $('set-fullanc').checked = !v;                    // save failed — revert
+};
+/* chain-top labels toggle (round 14 of the seed sync): settings.chainLabels
+   (default ON) gates the .chdr labels; render() re-runs on flip */
+$('set-chdr').onchange = async () => {
+  const v = $('set-chdr').checked;
+  const r = await act({ action: 'settings', set: { chainLabels: v } });
+  if (r) { SETTINGS = r.settings; render(); toast('⚙ chain-top labels ' + (v ? 'ON' : 'OFF')); }
+  else $('set-chdr').checked = !v;
 };
 document.addEventListener('pointerdown', (e) => {
   if ($('gearbox').style.display === 'block' && !e.target.closest('#gearbox,#gear')) toggleGear(false);
