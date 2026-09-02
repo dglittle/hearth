@@ -718,6 +718,57 @@ function probeOne(tok, slot) {
 function readLimitsCache() {
   try { return JSON.parse(fs.readFileSync(LIMITSF, 'utf8')); } catch (_) { return null; }
 }
+// ---- Sol (ChatGPT/codex) limits — passive, no probe (operator directive 2026-08-30, #2454).
+// codex CLI logs rate_limits in every token_count event of its session jsonl
+// (~/.codex/sessions/Y/M/D/rollout-*.jsonl): primary = 5h window, secondary =
+// weekly; used_percent + resets_at (epoch s). We tail-read the newest files
+// (newest-first, last 3 day-dirs, ≤10 files, 512KB tails) for the last entry
+// with a non-null primary. Freshness = the event timestamp (Sol only "probes"
+// when a codex session runs), surfaced as sol.at for the UI to show age.
+const CODEX_SESS = path.join(require('os').homedir(), '.codex', 'sessions');
+let solCache = null;         // { scannedAt, data } — 60s TTL, scans are cheap but not free
+function solLimits() {
+  if (solCache && Date.now() - solCache.scannedAt < 60_000) return solCache.data;
+  let data = null;
+  try {
+    const files = [];
+    for (let d = 0; d < 3 && files.length < 10; d++) {
+      const day = new Date(Date.now() - d * 86400e3);
+      const dir = path.join(CODEX_SESS, String(day.getUTCFullYear()),
+        String(day.getUTCMonth() + 1).padStart(2, '0'), String(day.getUTCDate()).padStart(2, '0'));
+      let names = [];
+      try { names = fs.readdirSync(dir).filter((n) => n.endsWith('.jsonl')); } catch (_) { continue; }
+      for (const n of names) {
+        const p = path.join(dir, n);
+        try { files.push({ p, mtime: fs.statSync(p).mtimeMs }); } catch (_) {}
+      }
+    }
+    files.sort((a, b) => b.mtime - a.mtime);
+    for (const f of files.slice(0, 10)) {
+      const fd = fs.openSync(f.p, 'r');
+      const size = fs.fstatSync(fd).size;
+      const len = Math.min(size, 512 * 1024);
+      const buf = Buffer.alloc(len);
+      fs.readSync(fd, buf, 0, len, size - len);
+      fs.closeSync(fd);
+      const lines = buf.toString('utf8').split('\n');
+      for (let i = lines.length - 1; i >= 0; i--) {
+        if (!lines[i].includes('"rate_limits"') || !lines[i].includes('"used_percent"')) continue;
+        try {
+          const o = JSON.parse(lines[i]);
+          const rl = o.payload && o.payload.rate_limits;
+          if (!rl || !rl.primary) continue;
+          data = { at: new Date(o.timestamp).getTime() || f.mtime,
+            primary: rl.primary, secondary: rl.secondary || null };
+          break;
+        } catch (_) {}
+      }
+      if (data) break;
+    }
+  } catch (_) {}
+  solCache = { scannedAt: Date.now(), data };
+  return data;
+}
 // token slot the most recent erg ran on (operator directive 2026-08-13, #1407): tail the
 // erg ledger (../ergs.jsonl); tokSlot is omitted there when it's 1.
 const LEDGERF = path.join(__dirname, '..', 'ergs.jsonl');
@@ -864,12 +915,13 @@ const handler = (req, res) => {
     if (url.searchParams.get('probe') === '1' && !probing && age > PROBE_MIN_MS)
       probing = probeLimits(url.searchParams.get('why') || 'page').finally(() => { probing = null; });
     const last = lastErgSlot();
+    const sol = solLimits();
     if (url.searchParams.get('probe') === '1' && probing) {
-      probing.then((d) => j(200, { ok: true, last, ...d }))
-             .catch(() => j(200, { ok: true, last, ...(cached || { at: 0, slots: [] }) }));
+      probing.then((d) => j(200, { ok: true, last, sol, ...d }))
+             .catch(() => j(200, { ok: true, last, sol, ...(cached || { at: 0, slots: [] }) }));
       return;
     }
-    return j(200, { ok: true, last, ...(cached || { at: 0, slots: [] }) });
+    return j(200, { ok: true, last, sol, ...(cached || { at: 0, slots: [] }) });
   }
 
   res.writeHead(404); res.end('{"ok":false}');

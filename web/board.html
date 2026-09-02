@@ -31,9 +31,16 @@
   button:active { background:var(--line); }
   button.on { border-color:var(--sel); color:#9ec9ff; }
   #bar button { padding:4px 8px; font-size:11.5px; }
-  #bar button#help, #bar button#gear { border-radius:50%; padding:0; width:20px; height:20px;
+  #bar button#help, #bar button#gear, #bar button#mx { border-radius:50%; padding:0; width:20px; height:20px;
     line-height:18px; font-size:12px; color:var(--dim); text-align:center; flex-shrink:0; }
   #bar button#help.on, #bar button#gear.on { color:#9ec9ff; }
+  /* 🟩 matrix-bg guard (#2443): dimmed emoji when off, full when on */
+  #bar button#mx { font-size:10px; filter:grayscale(1) opacity(.45); }
+  #bar button#mx.on { filter:none; border-color:#3a6b4d; }
+  /* perf graph (operator directive 2026-08-31, #2549): worst main-thread stall per ½s, last 60s */
+  #perf { width:120px; height:20px; align-self:center; background:#0d1014;
+    border:1px solid var(--line); border-radius:4px; }
+  @media (max-width:760px) { #perf { display:none; } }
   #findn { width:46px; background:#0d1014; color:var(--ink); border:1px solid var(--line);
     border-radius:7px; padding:4px 6px; font-size:11.5px; }
   #findn:focus { outline:none; border-color:var(--sel); }
@@ -107,6 +114,14 @@
   #limits .asof { color:#565962; }
   #limits button { padding:1px 5px; font-size:10.5px; border-radius:6px; }
 
+  /* ---- matrix background (operator directive 2026-08-30, #2443): fullscreen WebGL canvas
+     BEHIND everything — glyph streams flow from the screen borders to the
+     running ergs' output cards (screen-space, re-aimed every frame from the
+     live pan/zoom transform, so it stays sensible while navigating; offscreen
+     erg → the stream converges on the nearest edge point = direction hint).
+     Replaces the per-card green HUD overlay while ON; the 🟩 titlebar button
+     toggles it (default on) and OFF falls back to the legacy HUD. */
+  #mxbg { position:fixed; inset:0; pointer-events:none; }
   #viewport { position:fixed; inset:0; touch-action:none; cursor:grab; overflow:hidden; }
   #viewport.panning { cursor:grabbing; }
   #world { position:absolute; top:0; left:0; transform-origin:0 0; }
@@ -369,6 +384,7 @@
 </style>
 </head>
 <body>
+<canvas id="mxbg"></canvas>
 <div id="viewport"><div id="world"></div></div>
 <div id="band"></div>
 <!-- side panel: open cards render here, affixed to the frame (operator directive 2026-07-31, #51) -->
@@ -390,7 +406,11 @@
   <button id="help" title="gestures &amp; legend">?</button>
   <!-- ⚙ settings (operator directive 2026-08-23, #1899): erg-firing dials -->
   <button id="gear" title="settings">⚙</button>
+  <!-- 🟩 matrix background guard (operator directive 2026-08-30, #2443): default on; off = legacy HUD -->
+  <button id="mx" title="matrix background — border glyph streams flow to the running ergs (off = legacy green HUD overlay)">🟩</button>
   <span id="ergrun"></span>
+  <!-- perf graph (operator directive 2026-08-31, #2549): jank monitor, hover for stats -->
+  <canvas id="perf"></canvas>
   <!-- cumulative spend, all ergs ever (operator directive 2026-08-02, #764) -->
   <span id="spend" title="cumulative spend"></span>
   <span id="limits" title="subscription usage — tap ? for the legend">…</span>
@@ -432,7 +452,10 @@
   erg finishes with this page open, on a stale page load, or when you hit ↻ (server allows
   one probe per 90s). The <b>gold-boxed token</b> is the one the most recent erg ran on;
   new ergs start on the token whose f7d resets soonest (per the last probe), falling
-  back to the other on a limit hit.</p>
+  back to the other on a limit hit. <b>☀</b> = Sol (ChatGPT subscription, codex CLI):
+  <b>5h</b> + <b>wk</b> windows, read passively from the last codex session's own
+  rate-limit log — no probe possible, so it only refreshes when a Sol run happens
+  (hover shows how old the reading is).</p>
 </div>
 
 <div id="gearbox">
@@ -450,7 +473,6 @@
   <button id="a-child">+ child</button>
   <button id="a-stack" title="pile the selected cards under the top-most one (it stays put)">🗂 stack</button>
   <button id="a-edit">✏️ edit</button>
-  <button id="a-done">✓ done</button>
   <button id="a-arch">📥 archive</button>
   <button id="a-unarch">⬆ un-archive</button>
   <button id="a-erg" class="go">⚡ erg</button>
@@ -476,6 +498,7 @@
   <div class="row"><textarea id="ed-body" placeholder="body (markdown)"></textarea></div>
   <div class="row end">
     <button id="ed-cancel">cancel</button>
+    <button id="ed-saveask" class="go" title="status-card ask (operator directive 2026-09-02, #2636/#2648): append the STATUS-CARD ASK block to the body (erg answers tersely, puts meaty changes on the parent 'current state' card), save, then fire an erg on it">save + 🎯 ask + ⚡ erg</button>
     <button id="ed-saverg" class="go" title="save this card, then immediately fire an erg on it">save + ⚡ erg</button>
     <button id="ed-save" class="go">save</button>
   </div>
@@ -744,9 +767,11 @@ let posCache = new Map();
 let deriveFrom = new Map();   // positionless card id → parent id its display pos derives from (#1547)
 /* default drop slot for a new/positionless child (operator directive 2026-08-06, #986):
    directly beneath the parent — touching + aligned, exactly like 🗂 stack.
-   If the slot is already taken (a sibling stacked there), chain beneath the
-   occupant so nothing overlaps. Occupancy = exact (x,y) match of a visible
-   card's explicit pos or its cached display pos from this/last render. */
+   If the slot is already taken (a sibling there), FAN OUT: same y, x + 16px
+   per occupied slot (operator directive 2026-09-02, #2628 — was: chain beneath the occupant,
+   one below the next). Occupancy = exact (x,y) match of a visible card's
+   explicit pos or its cached display pos from this/last render. */
+const FAN_DX = 16;
 function slotBelow(x, y, skipId) {
   for (let i = 0; i < 80; i++) {
     let occ = null;
@@ -756,7 +781,7 @@ function slotBelow(x, y, skipId) {
       if (q && q.x === x && q.y === y) { occ = o; break; }
     }
     if (!occ) break;
-    y += ch(occ);
+    x += FAN_DX;
   }
   return { x, y };
 }
@@ -791,7 +816,8 @@ function dispPos(c, depth) {
         if (pp.y > by) { by = pp.y; best = { par, pp }; }
       }
       /* stack-style default (operator directive 2026-08-06, #986): touching + aligned under
-         the lowest parent; siblings chain via slotBelow (was +26x/+70y jitter) */
+         the lowest parent; siblings fan out +16x at the same y via slotBelow
+         (operator directive 2026-09-02, #2628; before that: chained beneath; originally +26x/+70y jitter) */
       p = slotBelow(best.pp.x, best.pp.y + ch(best.par), c.id);
       deriveFrom.set(c.id, best.par.id);   // shallow-drag live followers need this (#1547)
     }
@@ -868,21 +894,36 @@ const zoneHex6 = (hex) => {                   // normalize → '#aabbcc' (for <i
    em-based, so width scales with it) to span the zone minus the 12px pads;
    capped at 60% of the zone height so short-wide zones stay sane. */
 function fitZoneTitles(one) {
-  for (const el of (one ? [one] : world.querySelectorAll('.node.k-zone'))) {
-    const t = el.querySelector('.zttl');
-    if (!t || !t.textContent.trim()) continue;
-    t.style.fontSize = '16px';                             // reset to measuring base
-    const nat = t.offsetWidth;
-    if (!nat) continue;
-    const target = el.offsetWidth - 24;                    // 12px pad each side
-    t.style.fontSize = Math.max(9, Math.min(16 * target / nat, el.offsetHeight * .6)) + 'px';
-  }
+  /* batched write→read→write (#2549): the old per-zone write+read loop forced
+     one full reflow PER ZONE right after every world.innerHTML rebuild. */
+  const els = [...(one ? [one] : world.querySelectorAll('.node.k-zone'))]
+    .map((el) => ({ el, t: el.querySelector('.zttl') }))
+    .filter((z) => z.t && z.t.textContent.trim());
+  for (const z of els) z.t.style.fontSize = '16px';        // reset to measuring base
+  for (const z of els) {                                   // one reflow, then reads
+    z.nat = z.t.offsetWidth; z.w = z.el.offsetWidth; z.h = z.el.offsetHeight; }
+  for (const z of els) if (z.nat)
+    z.t.style.fontSize = Math.max(9, Math.min(16 * (z.w - 24) / z.nat, z.h * .6)) + 'px';
+}
+
+/* collapsed-card preview clamp (operator directive 2026-08-31, #2549): the card node is a
+   fixed clipped rect — feeding a huge body through world.innerHTML is pure
+   waste (one 516KB card body was costing every full render a multi-hundred-ms
+   stall = the scroll jerkiness). Cap the md() source by what the card could
+   possibly display (~area/6 chars, floor 2000); the side panel + editor still
+   show the full body. */
+function mdPreview(c) {
+  const cap = Math.max(1500, (cw(c) * ch(c) / 12) | 0);   // ≈5× the glyphs a card that size can show
+  return c.body.length > cap
+    ? md(c.body.slice(0, cap)) + ' <span style="color:#617182">… (open ⤢ for the rest)</span>'
+    : md(c.body);
 }
 
 /* ---- render (full rebuild; deferred while fingers down or editor open) ---- */
 function render() {
   if (ptrs.size || editorOpen) { pendingRender = true; return; }
   pendingRender = false;
+  const perfT0 = performance.now();          // perf graph (#2549)
   for (const id of [...expanded]) if (!sel.has(id)) expanded.delete(id);  // deselected → unexpand
   saveExp();
   // find multi-match glow rides the selection: any change drops it (#1702)
@@ -964,14 +1005,16 @@ function render() {
         style="left:${p.x}px;top:${p.y}px;width:${cw(c)}px;height:${isChip ? 34 : ch(c)}px">
       <div class="top"><span>#${c.id}</span>${fresh ? '<span class="nb">✦ new</span>' : ''}${wb}<span class="st" style="color:${stColor[c.status]}">${stGlyph[c.status]}</span><span>${esc(c.kind)}${iu}${lk}</span><span class="ts" title="${esc(tsTip)}">${esc(fmtTsShort(c.created_at))}</span></div>
       <div class="ttl">${esc(c.title)}</div>` +
-      (isChip ? '' : `<div class="txt">${md(c.body)}</div>`) +
+      (isChip ? '' : `<div class="txt">${mdPreview(c)}</div>`) +
       `<div class="btns"><button class="b-x" title="${expanded.has(c.id) ? 'close the side panel' : 'open in the side panel'}">${expanded.has(c.id) ? '🗕' : '⤢'}</button>` +
       (c.url ? `<button class="b-url" data-url="${esc(c.url)}" title="open link">↗</button>` : '') +
       `</div></div>`;
   }
   /* jet-HUD overlays (#988, resized #995/#999): one per running erg, floated over
-     its output card — 70% bigger, centered. Painted last = above every node (z:6 too). */
+     its output card — 70% bigger, centered. Painted last = above every node (z:6 too).
+     While the matrix background is ON it replaces these (operator directive 2026-08-30, #2443). */
   for (const e of ERGS) {
+    if (mxOn()) break;
     if (!(e.status === 'running' && e.alive && e.info_card)) continue;
     const c = CARDS.get(e.info_card);
     if (!c || !visible(c)) continue;
@@ -985,6 +1028,7 @@ function render() {
   paintHuds();
   renderPanel();
   updateBars();
+  perfRender(performance.now() - perfT0);    // perf graph (#2549)
 }
 
 /* ---- jet-HUD stream (#988): poll /hud while any erg runs; paint the tails
@@ -992,7 +1036,8 @@ function render() {
    5s card poll, and the payload is a few hundred bytes per running erg. ---- */
 let HUDS = new Map(), hudBusy = false;             // erg id -> {lines, gen, tt}
 async function pollHud() {
-  const on = ERGS.some((e) => e.status === 'running' && e.alive && e.info_card);
+  // matrix bg ON → no HUD overlays exist; skip the /hud stream poll (#2443)
+  const on = !mxOn() && ERGS.some((e) => e.status === 'running' && e.alive && e.info_card);
   if (!on) { if (HUDS.size) { HUDS = new Map(); GLY.clear(); HUDSTATE.clear(); paintHuds(); } return; }
   if (hudBusy) return;
   hudBusy = true;
@@ -1181,6 +1226,190 @@ function paintHuds_() {
 }
 setInterval(pollHud, 2500);
 
+/* ---- matrix background (operator directive 2026-08-30, #2443): fullscreen WebGL canvas
+   behind everything. Glyph streams spawn on the SCREEN BORDER and steer to
+   each running erg's output card; the card gets a breathing halo from behind.
+   Everything lives in SCREEN space and the targets are recomputed from the
+   live pan/zoom transform (V) every frame — pan/zoom just re-aims the flow.
+   Offscreen erg → its stream converges on the point clamped to the visible
+   rect (panel-aware via boardW) = a direction hint. No running ergs → sparse
+   ambient rain. Replaces the per-card green HUD overlay while ON; the 🟩
+   titlebar button guards it (default on, localStorage), OFF = legacy HUD. */
+let MX = localStorage.{{AGENT_NAME}}Mx !== '0';            // default ON
+const MXDPR = Math.min(2, devicePixelRatio || 1);
+const MXGL = (() => {
+  try {
+    const cnv = $('mxbg');
+    const gl = cnv.getContext('webgl', { alpha: false, antialias: false, depth: false });
+    if (!gl) return null;
+    /* glyph atlas: 8×8 cells of 64px — 62 matrix glyphs + cell 63 = soft disc (halo) */
+    const at = document.createElement('canvas'); at.width = at.height = 512;
+    const ax = at.getContext('2d');
+    ax.font = '46px ui-monospace, Menlo, monospace';
+    ax.textAlign = 'center'; ax.textBaseline = 'middle'; ax.fillStyle = '#fff';
+    const AGLY = (GLYCH + '0123456789ｵﾘ01Σ7');
+    for (let i = 0; i < 63; i++)
+      ax.fillText(AGLY[i % AGLY.length], (i % 8) * 64 + 32, Math.floor(i / 8) * 64 + 34);
+    const g = ax.createRadialGradient(480, 480, 2, 480, 480, 30);
+    g.addColorStop(0, 'rgba(255,255,255,.9)'); g.addColorStop(.45, 'rgba(255,255,255,.28)');
+    g.addColorStop(1, 'rgba(255,255,255,0)');
+    ax.fillStyle = g; ax.fillRect(448, 448, 64, 64);
+    const vs = 'attribute vec4 a;attribute vec2 b;uniform vec2 res;' +
+      'varying float vg;varying vec2 vb;' +
+      'void main(){gl_Position=vec4(a.x/res.x*2.-1.,1.-a.y/res.y*2.,0.,1.);' +
+      'gl_PointSize=a.z;vg=a.w;vb=b;}';
+    const fs = 'precision mediump float;uniform sampler2D tex;' +
+      'varying float vg;varying vec2 vb;' +
+      'void main(){vec2 cl=vec2(mod(vg,8.),floor(vg/8.));' +
+      'float al=texture2D(tex,(cl+gl_PointCoord)/8.).a;' +
+      'vec3 col=mix(vec3(.20,.72,.40),vec3(.82,1.,.86),vb.y);' +
+      'gl_FragColor=vec4(col*al*vb.x,1.);}';                 // additive: color only
+    const mk = (ty, src) => { const s = gl.createShader(ty); gl.shaderSource(s, src); gl.compileShader(s);
+      if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s)); return s; };
+    const pr = gl.createProgram();
+    gl.attachShader(pr, mk(gl.VERTEX_SHADER, vs)); gl.attachShader(pr, mk(gl.FRAGMENT_SHADER, fs));
+    gl.linkProgram(pr);
+    if (!gl.getProgramParameter(pr, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(pr));
+    gl.useProgram(pr);
+    const tex = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, at);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    const buf = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+    gl.bufferData(gl.ARRAY_BUFFER, 4096 * 6 * 4, gl.DYNAMIC_DRAW);
+    const la = gl.getAttribLocation(pr, 'a'), lb = gl.getAttribLocation(pr, 'b');
+    gl.enableVertexAttribArray(la); gl.vertexAttribPointer(la, 4, gl.FLOAT, false, 24, 0);
+    gl.enableVertexAttribArray(lb); gl.vertexAttribPointer(lb, 2, gl.FLOAT, false, 24, 16);
+    const ur = gl.getUniformLocation(pr, 'res');
+    gl.enable(gl.BLEND); gl.blendFunc(gl.ONE, gl.ONE);       // additive over the bg
+    gl.clearColor(13 / 255, 16 / 255, 20 / 255, 1);          // == --bg
+    const pmax = gl.getParameter(gl.ALIASED_POINT_SIZE_RANGE)[1] || 64;
+    return { cnv, gl, ur, pmax };
+  } catch (_) { return null; }
+})();
+function mxOn() { return MX && !!MXGL; }
+const MXBUF = new Float32Array(4096 * 6);
+const MXP = [];                                              // particle pool
+function mxSpawn() {
+  const W = innerWidth, H = innerHeight, s = Math.random() * 2 * (W + H);
+  let x, y;
+  if (s < W) { x = s; y = -10; }
+  else if (s < W + H) { x = W + 10; y = s - W; }
+  else if (s < 2 * W + H) { x = s - W - H; y = H + 10; }
+  else { x = -10; y = s - 2 * W - H; }
+  return { x, y, vx: 0, vy: 0, g: (Math.random() * 62) | 0, age: 0,
+    ti: (Math.random() * 4096) | 0, sd: Math.random() * 6.28,
+    spd: 140 + Math.random() * 110, sz: 9.5 + Math.random() * 4, tr: [] };
+}
+/* screen-space targets: one per running erg (clamped into view if offscreen).
+   Ground truth = the card's RENDERED DOM rect, not a recomputed board position:
+   dispPos + assumed card size can disagree with the real layout (fresh
+   positionless cards, deferred renders during pan/editor, expanded/tall
+   cards) — operator directive 2026-08-30 #2450 saw a halo over empty board. No element yet
+   (card arrived while renders were deferred) → no halo until it paints. */
+function mxTargets() {
+  const out = [], L = 8, R = boardW() - 8, T = barH(), B = innerHeight - 8;
+  for (const e of ERGS) {
+    if (!(e.status === 'running' && e.alive && e.info_card)) continue;
+    const c = CARDS.get(e.info_card); if (!c || !visible(c)) continue;
+    const el = world.querySelector('.node[data-id="' + e.info_card + '"]');
+    if (!el) continue;
+    const b = el.getBoundingClientRect();
+    let x = (b.left + b.right) / 2, y = (b.top + b.bottom) / 2;
+    const on = x > L && x < R && y > T && y < B;
+    if (!on) { x = Math.min(R - 24, Math.max(L + 24, x)); y = Math.min(B - 24, Math.max(T + 24, y)); }
+    out.push({ x, y, edge: !on,
+      r: on ? Math.max(44, Math.hypot(b.width, b.height) * .60) : 64 });
+  }
+  return out;
+}
+let mxRaf = 0, mxLast = 0, mxTick = 0;
+function mxLoop(ts) {
+  mxRaf = 0;
+  if (!mxOn()) return;                                       // mxApply restarts
+  mxRaf = requestAnimationFrame(mxLoop);
+  const { cnv, gl, ur, pmax } = MXGL;
+  const bw = innerWidth * MXDPR | 0, bh = innerHeight * MXDPR | 0;
+  if (cnv.width !== bw || cnv.height !== bh) {
+    cnv.width = bw; cnv.height = bh; gl.viewport(0, 0, bw, bh); gl.uniform2f(ur, bw, bh);
+  }
+  const dt = Math.min(.05, (ts - mxLast) / 1000 || .016); mxLast = ts; mxTick++;
+  const tg = mxTargets();
+  const want = tg.length ? Math.min(500, 120 + 140 * tg.length) : 130;
+  for (let k = 0; k < 8 && MXP.length < want; k++) MXP.push(mxSpawn());
+  const H = innerHeight;
+  for (let i = MXP.length - 1; i >= 0; i--) {
+    const p = MXP[i];
+    const t = tg.length ? tg[p.ti % tg.length] : null;
+    let dead = false;
+    if (t) {
+      const dx = t.x - p.x, dy = t.y - p.y, d = Math.hypot(dx, dy) || 1;
+      if (d < t.r * .55 + 10 || p.age > 16) dead = true;
+      else {
+        /* steer at the target + a perpendicular sway → living, braided streams */
+        const wob = Math.sin(p.age * 2.1 + p.sd) * .35;
+        const ux = dx / d, uy = dy / d;
+        const dvx = (ux - uy * wob) * p.spd, dvy = (uy + ux * wob) * p.spd;
+        const m = Math.min(1, dt * 2.4);
+        p.vx += (dvx - p.vx) * m; p.vy += (dvy - p.vy) * m;
+      }
+    } else {                                                 // ambient rain
+      const m = Math.min(1, dt * 2);
+      p.vx += (Math.sin(p.age * .9 + p.sd) * 16 - p.vx) * m;
+      p.vy += (p.spd * .38 - p.vy) * m;
+      if (p.y > H + 20 || p.age > 30) dead = true;
+    }
+    if (dead) {
+      if (MXP.length > want) MXP.splice(i, 1);
+      else MXP[i] = mxSpawn();
+      continue;
+    }
+    p.x += p.vx * dt; p.y += p.vy * dt; p.age += dt;
+    if (((mxTick + i) % 9) === 0) p.g = (Math.random() * 62) | 0;   // glyph flicker
+    if ((mxTick & 1) === 0) { p.tr.unshift(p.x, p.y); if (p.tr.length > 12) p.tr.length = 12; }
+  }
+  /* fill the point buffer: halos first (under the glyphs), then trails + heads */
+  let n = 0;
+  const put = (x, y, sz, gy, al, br) => { if (n >= 4096) return;
+    const o = n++ * 6;
+    MXBUF[o] = x * MXDPR; MXBUF[o + 1] = y * MXDPR;
+    MXBUF[o + 2] = Math.min(pmax, sz * MXDPR);
+    MXBUF[o + 3] = gy; MXBUF[o + 4] = al; MXBUF[o + 5] = br; };
+  const tsec = ts / 1000;
+  for (const t of tg) {
+    const br = .5 + .5 * Math.sin(tsec * 2.2 + t.x * .01);   // breathe
+    put(t.x, t.y, t.r * 2.6, 63, (t.edge ? .5 : .30) + .12 * br, .25);
+    put(t.x, t.y, t.r * 1.2, 63, (t.edge ? .40 : .22) + .10 * br, .55);
+  }
+  for (const p of MXP) {
+    for (let k = 2; k < p.tr.length; k += 2)                 // trail (skip newest = head pos)
+      put(p.tr[k], p.tr[k + 1], p.sz * .92, (p.g * 3 + k * 5) % 62,
+        .34 * (1 - k / p.tr.length), .12);
+    put(p.x, p.y, p.sz, p.g, .8, .72);                       // bright head
+  }
+  gl.clear(gl.COLOR_BUFFER_BIT);
+  gl.bufferSubData(gl.ARRAY_BUFFER, 0, MXBUF.subarray(0, n * 6));
+  gl.drawArrays(gl.POINTS, 0, n);
+}
+function mxApply() {
+  const b = $('mx');
+  b.classList.toggle('on', mxOn());
+  b.style.display = MXGL ? '' : 'none';                      // no WebGL → legacy HUD, no guard
+  $('mxbg').style.display = mxOn() ? '' : 'none';
+  if (mxOn() && !mxRaf) { mxLast = 0; mxRaf = requestAnimationFrame(mxLoop); }
+}
+$('mx').onclick = () => {
+  MX = !MX;
+  try { localStorage.{{AGENT_NAME}}Mx = MX ? '1' : '0'; } catch (_) {}
+  mxApply(); render();
+  toast(MX ? '🟩 matrix background on' : 'matrix background off — legacy HUD overlay');
+};
+mxApply();
+
 /* fast path for taps (operator directive 2026-07-31, #681): opening/closing the side panel
    only changes sel/expanded — no card data or geometry moved. A full render()
    (world.innerHTML over every card, markdown-ing every body) takes long enough
@@ -1320,7 +1549,6 @@ function updateBars() {
   ab.style.display = 'flex';
   const cs = [...sel].map((id) => CARDS.get(id)).filter(Boolean);
   $('a-info').textContent = cs.length === 1 ? '#' + cs[0].id : cs.length + ' cards';
-  $('a-done').style.display = cs.some((c) => c.status === 'draft' || c.status === 'ready') ? '' : 'none';
   $('a-arch').style.display = cs.some((c) => c.status !== 'archived') ? '' : 'none';
   $('a-unarch').style.display = cs.some((c) => c.status === 'archived') ? '' : 'none';
   $('a-edit').style.display = cs.length === 1 ? '' : 'none';
@@ -1777,9 +2005,14 @@ function restoreEditor() {
 $('ed-cancel').onclick = closeEditor;
 /* save (shared by the two buttons): fire=true also spawns an erg on the saved
    card right away — "save + ⚡ erg" (operator directive 2026-08-13, #153). */
-async function edSaveGo(fire) {
+async function edSaveGo(fire, ask) {
   const title = $('ed-title').value.trim();
-  const body = $('ed-body').value, url = $('ed-url').value.trim();
+  /* ask = "save + 🎯 ask + ⚡ erg" (operator directive 2026-09-02, #2648): append the
+     STATUS-CARD ASK block (once) before saving, so the erg answering this
+     card rewrites its parent status card and replies tersely. */
+  let body = $('ed-body').value;
+  if (ask && !body.includes(ASK_MARK)) { body = (body.trimEnd() + '\n\n' + ASK_BLOCK).trimStart(); $('ed-body').value = body; }
+  const url = $('ed-url').value.trim();
   const imp = $('ed-imp').value ? +$('ed-imp').value : null;
   const urg = $('ed-urg').value ? +$('ed-urg').value : null;
   let r, cid;
@@ -1898,7 +2131,25 @@ async function setStatus(pick, st, label) {
   if (n) toast(n + ' → ' + label);
   poll();
 }
-$('a-done').onclick = () => setStatus((c) => c.status === 'draft' || c.status === 'ready', 'done', 'done ✓');
+/* 🎯 status-ask (operator directive 2026-09-02, #2636 → #2648): the "current state" card
+   pattern — a durable status card (e.g. one Jira ticket: state + links to
+   PR/threads) with questions hung beneath it. The erg that answers a question
+   must put meaty changes ON THE STATUS CARD (the only context future ergs on
+   it will see) and reply tersely in its output card. The editor's
+   "save + 🎯 ask + ⚡ erg" button (edSaveGo(true, true)) appends this block
+   so the operator never types it. (✓ done abar button retired #2636; the interim
+   abar 🎯 button retired #2648.) */
+const ASK_MARK = '━━ STATUS-CARD ASK';
+const ASK_BLOCK = ASK_MARK + ' (the operator\'s protocol, #2636) ━━\n' +
+  'This card = a question under a "current state" card = its PARENT.\n' +
+  'Erg answering it:\n' +
+  '• the parent status card is the durable record and the ONLY context future ergs on it see — ' +
+  'put every meaty result THERE (`card edit <parent> --body -`, `--title` if the one-line state changed): ' +
+  'rewrite the state in place — current status, links (Jira/PR/threads), replace stale lines, no running log\n' +
+  '• your output card = terse, on-point answer + one line per change made to the status card ' +
+  '("status card: updated X · added link Y") — nothing durable here\n' +
+  '• nothing to change → say so in one line';
+$('ed-saveask').onclick = () => edSaveGo(true, true);
 $('a-arch').onclick = () => setStatus((c) => c.status !== 'archived', 'archived', 'archived 📥');
 $('a-unarch').onclick = () => setStatus((c) => c.status === 'archived', 'done', 'un-archived (done)');
 $('a-erg').onclick = async () => {
@@ -1969,7 +2220,32 @@ function renderLimits(d) {
     }
     return tokOpen + '<span class="tn">t' + s.slot + '</span><span class="lgrid">' + cells.join('') + '</span></span>';
   }).join('') || '<span class="dial">(no data — hit ↻)</span>';
-  $('limits').innerHTML = rows +
+  // ---- Sol (ChatGPT/codex) block — passive data from the last codex session
+  // event (operator directive 2026-08-30, #2454); age of that event shown in tooltips since
+  // no probe can refresh it (it updates whenever a Sol review runs).
+  let solRow = '';
+  if (d.sol && d.sol.primary) {
+    const cells = [];
+    const solAge = d.sol.at ? ago(d.sol.at) : '?';
+    for (const [b, lab, wk] of [[d.sol.primary, '5h', '5h'], [d.sol.secondary, 'wk', '7d']]) {
+      if (!b) continue;
+      const pct = Math.round(b.used_percent);
+      const cls = pct >= 90 ? ' crit' : pct >= 75 ? ' warn' : '';
+      const reset = (b.resets_at || 0) * 1000;
+      const title = 'Sol (ChatGPT) ' + lab + ' · ' + pct + '% used · resets ' + esc(fmtReset(reset)) +
+        ' · as of last codex event ' + solAge + ' ago';
+      const ePct = reset ? Math.round(Math.max(0, Math.min(1, 1 - (reset - Date.now()) / LIMIT_WIN[wk])) * 100) : 0;
+      const use = '<span class="bar use' + cls + '" title="' + title + '"><i style="width:' + Math.min(100, pct) + '%"></i></span>';
+      const time = '<span class="bar time" title="' + ePct + '% of the ' + (lab === '5h' ? '5-hour' : '7-day') +
+        ' window elapsed · resets ' + esc(fmtReset(reset)) + '"><i style="width:' + ePct + '%"></i></span>';
+      cells.push('<span class="lb' + cls + '" title="' + title + '">' + lab + '</span>' +
+        '<span class="bstack">' + use + time + '</span>');
+    }
+    solRow = '<span class="tok" title="Sol usage (ChatGPT subscription, codex CLI) — from the last codex session event, ' +
+      solAge + ' ago; refreshes whenever a Sol run happens">' +
+      '<span class="tn">☀</span><span class="lgrid">' + cells.join('') + '</span></span>';
+  }
+  $('limits').innerHTML = rows + solRow +
     '<span class="asof" id="limage"></span>' +
     '<button id="limref" title="probe both tokens now (~2 tiny calls; server allows at most one probe per 90s)">↻</button>';
   $('limref').onclick = () => fetchLimits(true, 'manual');
@@ -1991,6 +2267,64 @@ function tickAge() {
     (d.why ? ' · ' + String(d.why) : '') : 'never probed';
 }
 setInterval(tickAge, 20000);
+
+/* ---- perf graph (operator directive 2026-08-31, #2549): titlebar jank monitor ----
+   One bar per ½s bucket, 120 buckets = last 60s. Bar height = the WORST
+   rAF frame gap seen in that bucket (≈ longest task that blocked the main
+   thread — exactly what a stuck scroll feels like). green <33ms · yellow
+   <100ms · red ≥100ms; a white tick on a bar = a full render() ran in that
+   bucket (its ms is usually THE stall). Gaps >1.5s are dropped as
+   tab-hidden noise. Hover for numbers. */
+const PERF = (() => {
+  const N = 120, BK = 500, gaps = new Float32Array(N), rnds = new Float32Array(N);
+  const cnv = $('perf'); if (!cnv) return { render() {} };
+  const dpr = Math.min(2, devicePixelRatio || 1);
+  cnv.width = 120 * dpr; cnv.height = 20 * dpr;
+  const x = cnv.getContext('2d');
+  let head = -1, last = 0, lastRender = 0, renders = 0;
+  const bkt = (t) => Math.floor(t / BK);
+  function advance(t) {                       // move head to t's bucket, zero skipped
+    const b = bkt(t);
+    if (head < 0 || b - head > N) {           // boot / long tab sleep → fresh window
+      head = b; gaps.fill(0); rnds.fill(0); return b % N; }
+    for (; head < b; ) { head++; gaps[head % N] = 0; rnds[head % N] = 0; }
+    return head % N;
+  }
+  function draw() {
+    const W = cnv.width, H = cnv.height, bw = W / N;
+    x.clearRect(0, 0, W, H);
+    let worst = 0;
+    for (let k = 0; k < N; k++) {
+      const i = (head - (N - 1 - k) % N + N * 4) % N;   // oldest → newest, L → R
+      const g = gaps[i]; if (g > worst) worst = g;
+      if (g < 22) continue;                              // vsync noise floor
+      const h = Math.max(2, Math.sqrt(Math.min(1, g / 400)) * H);
+      x.fillStyle = g < 33 ? '#2f7d4a' : g < 100 ? '#c9a227' : '#d0483e';
+      x.fillRect(k * bw, H - h, Math.max(1, bw - dpr * .5), h);
+      if (rnds[i]) { x.fillStyle = '#dfe7ee'; x.fillRect(k * bw, Math.max(0, H - h - 3 * dpr), Math.max(1, bw - dpr * .5), 2 * dpr); }
+    }
+    cnv.title = 'main-thread stalls, last 60s (worst frame gap per ½s)\n' +
+      'worst: ' + Math.round(worst) + 'ms · last full render: ' + Math.round(lastRender) +
+      'ms (' + renders + ' renders since load)\n' +
+      'green <33ms · yellow <100ms · red ≥100ms · white tick = render() ran there';
+  }
+  function loop(ts) {
+    requestAnimationFrame(loop);
+    const gap = last ? ts - last : 0; last = ts;
+    if (gap <= 0 || gap > 1500) return;                  // boot / tab-hidden
+    const i = advance(ts);
+    if (gap > gaps[i]) gaps[i] = gap;
+    if (bkt(ts) !== bkt(ts - gap) || gap > 100) draw();  // redraw ~2/s or on a spike
+  }
+  requestAnimationFrame(loop);
+  return { render(ms) {                                  // called from render()
+    lastRender = ms; renders++;
+    const i = advance(performance.now());
+    if (ms > rnds[i]) rnds[i] = ms;
+    if (ms > gaps[i]) gaps[i] = ms;                      // render ran sync — it IS the gap
+  } };
+})();
+function perfRender(ms) { PERF.render(ms); }
 async function fetchLimits(probe, why) {
   try {
     const r = await fetch('/limits?k=' + K + (probe ? '&probe=1&why=' + encodeURIComponent(why || 'page') : ''));

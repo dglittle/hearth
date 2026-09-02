@@ -3,8 +3,10 @@
 # (it describes YOUR machine, which is exactly what should never be
 # committed to the shared seed). Every key is optional.
 #
-# Where the `claude` CLI lives. Default: `claude` on PATH.
-#CLAUDE_BIN=/usr/local/bin/claude
+# Where the `claude` CLI lives. Default: `claude` on PATH. erg.js's MODEL needs
+# a recent CLI (older ones reject newer models client-side with a 400); to pin
+# your own: `cd vendor/claude-cli && npm i` then point here:
+#CLAUDE_BIN={{AGENT_DIR}}/vendor/claude-cli/node_modules/.bin/claude
 #
 # File holding CLAUDE_CODE_OAUTH_TOKEN= (and optional CLAUDE_CODE_OAUTH_TOKEN_2=
 # fallback). If unset, the tokens are taken from the process environment.

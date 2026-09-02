@@ -51,7 +51,7 @@ try {
 
 const CLAUDE = process.env.ERG_CLAUDE_BIN || CONF.CLAUDE_BIN || 'claude';
 const TEST_MODE = !!process.env.ERG_CLAUDE_BIN;   // stub binary → skip budget probes
-const MODEL = 'claude-fable-5';
+const MODEL = 'claude-fable-5-1';   // needs claude CLI ≥2.1.251 — older CLIs reject the model client-side with a 400 (vendor/claude-cli pins one; see host.conf.example)
 const FALLBACK_MODEL = 'claude-opus-5'; // when fable weekly budget is dry (the operator 2026-07-27)
 const TOOLS = 'Bash,BashOutput,KillShell,Read,Edit,Write,Glob,Grep,WebFetch,WebSearch,TodoWrite';
 // BashOutput/KillShell added erg 589: bg-contract (card #1608) makes
@@ -228,6 +228,9 @@ function ancestorDump(rootIds) {
     level = next;
   }
   if (!out.length) return '';
+  // No size cap (operator directive 2026-08-26, card #2090): the prompt is delivered via
+  // STDIN (see runClaude), so the 128KiB argv limit that killed ergs 791-793
+  // no longer applies — the dump may be arbitrarily large.
   let s = '\n\n── full ancestor context (every ancestor of the target card(s), bodies included; ' +
     'gear ⚙ on the board toggles this) ──';
   for (const a of out) {
@@ -416,11 +419,23 @@ process.on('SIGTERM', () => {
 });
 
 // ---- async claude run with hard timeout ----
-function runClaude(args, env) {
+// The PROMPT goes in via STDIN, not argv (operator directive 2026-08-26, card #2090): argv
+// strings are capped at 128KiB each (MAX_ARG_STRLEN) and node's spawn() throws
+// E2BIG SYNCHRONOUSLY past it — which killed ergs 791-793 silently when the
+// full-ancestor dump grew big. stdin has no such limit. The system prompt
+// rides in a file (--system-prompt-file, verified on claude 2.1.206) for the
+// same reason. The try/catch stays as a belt-and-suspenders.
+function runClaude(args, env, promptText) {
   return new Promise((resolve) => {
-    const ch = spawn(CLAUDE, args, { cwd: HOME, env, detached: true });   // own group → stoppable as a tree
+    let ch;
+    try { ch = spawn(CLAUDE, args, { cwd: HOME, env, detached: true }); }   // own group → stoppable as a tree
+    catch (e) {   // e.g. E2BIG (argv string >128KiB) throws SYNCHRONOUSLY (erg 794)
+      return resolve({ status: -1, stdout: '', stderr: 'spawn threw: ' + e.message });
+    }
     CHILD = ch;
     let out = '', err = '';
+    ch.stdin.on('error', () => {});          // EPIPE if the child dies before reading
+    ch.stdin.end(promptText != null ? promptText : '');
     ch.stdout.on('data', (d) => { out += d; });
     ch.stderr.on('data', (d) => { err += d; });
     const killer = setTimeout(() => {
@@ -491,13 +506,20 @@ function runClaude(args, env) {
     const env = { ...baseEnv };
     if (TOKS[tokSlot - 1]) env.CLAUDE_CODE_OAUTH_TOKEN = TOKS[tokSlot - 1];
     if (BG_WAIT) env.ERG_BG = '1';           // arms tools/bg-hook.js (card #1608)
-    const args = ['-p', isResume ? resumePrompt : prompt, '--output-format', 'json',
+    // system prompt → file (argv-limit dodge, card #2090); resume reuses the
+    // file persisted for its original session (findResume verified it reads).
+    const sysFile = sysPath(sid);
+    if (!isResume) {
+      try { fs.mkdirSync(ERGS_DIR, { recursive: true }); fs.writeFileSync(sysFile, sysPrompt); }
+      catch (e) { log('sys-prompt file write failed: ' + e.message); }
+    }
+    const args = ['-p', '--output-format', 'json',   // prompt arrives on STDIN (card #2090)
       '--model', model,
       '--setting-sources', 'user',            // no project source → no CLAUDE.md
       '--disable-slash-commands',             // no skills
       '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}',
       '--allowedTools', TOOLS, '--disallowedTools', NO_TOOLS, '--permission-mode', 'dontAsk',
-      '--system-prompt', isResume ? resume.sys : sysPrompt,
+      '--system-prompt-file', sysFile,
       ...(BG_WAIT ? ['--settings', BG_SETTINGS] : []),
       ...(isResume ? ['--resume', resume.sid] : ['--session-id', sid])];
     t0 = Date.now(); ran = true;
@@ -511,7 +533,7 @@ function runClaude(args, env) {
       (attempt ? ' (RETRY on token ' + tokSlot + ')'
                : (slotWhy ? ' [token ' + tokSlot + ', ' + slotWhy + ']' : '')) +
       (extra ? ' :: ' + extra.slice(0, 100).replace(/\n/g, ' ') : ''));
-    r = await runClaude(args, env);
+    r = await runClaude(args, env, isResume ? resumePrompt : prompt);
     res = null; try { res = JSON.parse(r.stdout); } catch (_) {}
     ok = !!res && !res.is_error && r.status === 0;
     if (ok) break;
@@ -600,12 +622,12 @@ async function bgWaitLoop(sid, model, tokSlot, r, res) {
     log('bg-wake #' + wakes + ': ' + ready.length + ' job(s) done, ' + remaining + ' pending — resuming ' + sid);
     const env = { ...baseEnv, ERG_BG: '1' };
     if (TOKS[tokSlot - 1]) env.CLAUDE_CODE_OAUTH_TOKEN = TOKS[tokSlot - 1];
-    const args = ['-p', wp, '--output-format', 'json', '--model', model,
+    const args = ['-p', '--output-format', 'json', '--model', model,   // prompt on STDIN (card #2090)
       '--setting-sources', 'user', '--disable-slash-commands',
       '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}',
       '--allowedTools', TOOLS, '--disallowedTools', NO_TOOLS, '--permission-mode', 'dontAsk',
-      '--system-prompt', SYS_USED, '--settings', BG_SETTINGS, '--resume', sid];
-    const r2 = await runClaude(args, env);
+      '--system-prompt-file', sysPath(sid), '--settings', BG_SETTINGS, '--resume', sid];
+    const r2 = await runClaude(args, env, wp);
     let res2 = null; try { res2 = JSON.parse(r2.stdout); } catch (_) {}
     if (!res2 || res2.is_error || r2.status !== 0) {
       log('bg-wake resume FAILED (jobs stay on disk in ' + BG_DIR(sid) + '): ' +
