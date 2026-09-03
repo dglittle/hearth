@@ -1783,6 +1783,8 @@ vp.addEventListener('pointermove', (e) => {
       if (hel) { const hc = CARDS.get(cid);
         hel.style.left = (o.x + dxw - cw(hc) * .35) + 'px';
         hel.style.top = (o.y + dyw - ch(hc) * .35) + 'px'; }
+      const lel = world.querySelector(`.chdr[data-for="${cid}"]`);  // chain-top label rides along (operator directive 2026-09-03)
+      if (lel) { lel.style.left = (o.x + dxw) + 'px'; lel.style.top = (o.y + dyw - 42) + 'px'; }
     }
     // arrows follow the cards live during the drag (operator directive 2026-07-29, #313)
     if (dragPaths) {
