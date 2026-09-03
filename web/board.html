@@ -980,8 +980,18 @@ function render() {
   const pos = new Map();
   for (const c of cards) pos.set(c.id, dispPos(c));
   /* painter's order = top of screen first, so where cards overlap (🗂 stacks,
-     #702) the lower card paints on top and its header line stays visible */
-  cards.sort((a, b) => pos.get(a.id).y - pos.get(b.id).y || a.id - b.id);
+     #702) the lower card paints on top and its header line stays visible.
+     Cards on the SAME ROW (|Δy| ≤ ROW_EPS — fanned-out siblings sit at one
+     derived y, and a hand-dragged neighbour lands a few px off it) paint
+     left→right so the right-most card wins, then by id (operator report
+     2026-09-03: a fanned card painted BEHIND its left neighbour because the
+     neighbour's y was a hair larger). */
+  const ROW_EPS = 12;
+  cards.sort((a, b) => {
+    const pa = pos.get(a.id), pb = pos.get(b.id);
+    if (Math.abs(pa.y - pb.y) > ROW_EPS) return pa.y - pb.y;
+    return pa.x - pb.x || a.id - b.id;
+  });
 
   let svg = `<svg width="10" height="10">
     <defs><marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
