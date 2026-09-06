@@ -121,7 +121,17 @@
      erg → the stream converges on the nearest edge point = direction hint).
      Replaces the per-card green HUD overlay while ON; the 🟩 titlebar button
      toggles it (default on) and OFF falls back to the legacy HUD. */
-  #mxbg { position:fixed; inset:0; pointer-events:none; }
+  /* width/height:100% is REQUIRED: a <canvas> is a replaced element, so inset:0 alone
+     does not stretch it — its CSS size defaults to its buffer size (innerWidth×DPR), i.e.
+     2× the viewport on Retina → halos/glyphs drawn at 2× the card's screen position
+     (operator directive 2026-09-06 #3216; invisible at DPR 1, where it was first verified). */
+  /* z-index:10 since erg 1299 (the operator #3248): the layer rides ABOVE the cards (world, .hud z6) so
+     glyphs visibly land on the erg'ing card; still under the lasso band (15), title bar (20),
+     panel/editor (26/30). Transparent canvas, premultiplied 'over' blending. */
+  #mxbg { position:fixed; inset:0; width:100%; height:100%; pointer-events:none; z-index:10; }
+  /* rAF badge (the operator #3248): '▶ mx' = animation frames being requested · '◦' = idle */
+  #rafi { font:11px ui-monospace, Menlo, monospace; color:#4b5a66; align-self:center; min-width:2ch; white-space:nowrap; }
+  #rafi.on { color:#57e389; }
   #viewport { position:fixed; inset:0; touch-action:none; cursor:grab; overflow:hidden; }
   #viewport.panning { cursor:grabbing; }
   #world { position:absolute; top:0; left:0; transform-origin:0 0; }
@@ -310,6 +320,14 @@
     animation:hitpulse 0.9s ease-in-out 3; }
   @keyframes hitpulse {
     50% { outline-color:#fff3c4; box-shadow:0 0 30px 10px rgba(255,210,87,.9); } }
+  /* ✨ panel highlight (operator directive 2026-09-06, #3210): the cards an open card MENTIONS
+     (#ids in its text, or its ✨ line, + ref links) wear a persistent cyan glow —
+     independent of selection (drag/lasso/tap leave it alone); only the ✨ button
+     on the same panel card (or ✨ on another card) turns it off. No animation:
+     it doesn't end on its own. */
+  .node.hl { outline:4px solid #5fe3ff; outline-offset:3px;
+    box-shadow:0 0 18px 4px rgba(95,227,255,.55); opacity:1; }
+  .pcard .phead .pbtns button.on { color:#5fe3ff; text-shadow:0 0 8px rgba(95,227,255,.8); }
   /* fresh = never OPENED in THIS browser (operator directive 2026-07-29, #372 + #381;
      narrowed 2026-08-05, #904): static gold-tinted BACKGROUND + gold border +
      ✦ new badge, until the card is opened in the side panel. Select/drag/lasso
@@ -420,6 +438,8 @@
   <!-- 🟩 matrix background guard (operator directive 2026-08-30, #2443): default on; off = legacy HUD -->
   <button id="mx" title="matrix background — border glyph streams flow to the running ergs (off = legacy green HUD overlay)">🟩</button>
   <span id="ergrun"></span>
+  <!-- rAF badge (operator directive 2026-09-06, #3248): are we animating (▶ loop names) or idle (◦)? -->
+  <span id="rafi" title="idle — no animation frames requested">◦</span>
   <!-- perf graph (operator directive 2026-08-31, #2549): jank monitor, hover for stats -->
   <canvas id="perf"></canvas>
   <!-- cumulative spend, all ergs ever (operator directive 2026-08-02, #764) -->
@@ -513,7 +533,11 @@
   <div class="row"><textarea id="ed-body" placeholder="body (markdown)"></textarea></div>
   <div class="row end">
     <button id="ed-cancel">cancel</button>
-    <button id="ed-saveask" class="go" title="status-card ask (operator directive 2026-09-02, #2636/#2648): append the STATUS-CARD ASK block to the body (erg answers tersely, puts meaty changes on the parent 'current state' card), save, then fire an erg on it">save + 🎯 ask + ⚡ erg</button>
+    <select id="ed-inject" title="inject a protocol prompt into the body (operator directive 2026-09-06, #3234): pick one → its block is appended once; pick several if you like; then press save + ⚡ erg">
+      <option value="">＋ inject prompt…</option>
+      <option value="ask">🎯 status-card ask</option>
+      <option value="turk">🧑‍🏭 turk brief (HTML hand-off)</option>
+    </select>
     <button id="ed-saverg" class="go" title="save this card, then immediately fire an erg on it">save + ⚡ erg</button>
     <button id="ed-save" class="go">save</button>
   </div>
@@ -593,9 +617,30 @@ const md = (s) => {
    fenced code, headings, lists, blockquotes, hr, paragraphs */
 function mdFull(s) {
   const src = String(s ?? '').split('\n');
-  const out = []; let i = 0, list = null, para = [];
+  const out = []; let i = 0, para = [];
   const flushPara = () => { if (para.length) { out.push('<p>' + para.map(inlineMd).join('<br>') + '</p>'); para = []; } };
-  const closeList = () => { if (list) { out.push('</' + list + '>'); list = null; } };
+  /* nested lists (operator directive 2026-09-06, #3218): a stack of open lists keyed by
+     indent; an indented item nests INSIDE the previous <li> instead of closing
+     the list — before this, "1. / - sub / 2." closed the <ol> at the sub-bullet
+     and reopened a fresh one, so every numbered item rendered as "1.". The
+     <li> stays open until its sibling/parent arrives; indented plain lines
+     continue the item. <ol start> honours the first number. */
+  const stack = [];                                   // [{ tag, ind }]
+  const closeTo = (ind) => { while (stack.length && stack[stack.length - 1].ind > ind) {
+    const s = stack.pop(); out.push('</li></' + s.tag + '>'); } };
+  const closeList = () => closeTo(-1);
+  const listItem = (tag, ind, text, start) => {
+    flushPara(); closeTo(ind);
+    const top = stack[stack.length - 1];
+    if (top && top.ind === ind) {
+      if (top.tag === tag) out.push('</li>');
+      else { stack.pop(); out.push('</li></' + top.tag + '><' + tag + '>'); stack.push({ tag, ind }); }
+    } else {                                          // deeper (or first) → nest inside the open <li>
+      out.push('<' + tag + (tag === 'ol' && start > 1 ? ' start="' + start + '"' : '') + '>');
+      stack.push({ tag, ind });
+    }
+    out.push('<li>' + inlineMd(text));
+  };
   while (i < src.length) {
     const t = src[i].trim(); let m;
     if (t.startsWith('```')) {
@@ -623,12 +668,11 @@ function mdFull(s) {
         r.map((c) => '<td>' + c + '</td>').join('') + '</tr>').join('') + '</tbody></table>');
       continue;
     }
-    if ((m = t.match(/^[-*+]\s+(.*)/))) { flushPara();
-      if (list !== 'ul') { closeList(); out.push('<ul>'); list = 'ul'; }
-      out.push('<li>' + inlineMd(m[1]) + '</li>'); i++; continue; }
-    if ((m = t.match(/^\d+[.)]\s+(.*)/))) { flushPara();
-      if (list !== 'ol') { closeList(); out.push('<ol>'); list = 'ol'; }
-      out.push('<li>' + inlineMd(m[1]) + '</li>'); i++; continue; }
+    const ind = src[i].search(/\S/);                  // leading-space depth of this line
+    if ((m = t.match(/^[-*+]\s+(.*)/))) { listItem('ul', ind, m[1]); i++; continue; }
+    if ((m = t.match(/^(\d+)[.)]\s+(.*)/))) { listItem('ol', ind, m[2], +m[1]); i++; continue; }
+    if (stack.length && ind > stack[stack.length - 1].ind) {   // indented plain line = continues the item
+      out.push('<br>' + inlineMd(t)); i++; continue; }
     if ((m = t.match(/^>\s?(.*)/))) { flushPara(); closeList();
       const q = [m[1]]; i++;
       while (i < src.length && (m = src[i].trim().match(/^>\s?(.*)/))) { q.push(m[1]); i++; }
@@ -644,6 +688,38 @@ const CARDS = new Map();            // id -> card row
 let LINKS = [], ERGS = [], WARM = new Map(), VER = null, since = '';
 const sel = new Set(), expanded = new Set();
 const hits = new Set();             // find multi-match glow (⊆ sel; #1702)
+/* ✨ panel highlight (operator directive 2026-09-06, #3210): `hl` = ids glowing cyan, `hlSrc` =
+   the open card whose ✨ button lit them. Persists across reloads; independent of
+   `sel` (that is the point — no need to "de-select" it, the button toggles). */
+const hl = new Set(); let hlSrc = null;
+const saveHl = () => {
+  try { localStorage.{{AGENT_NAME}}Hl = JSON.stringify({ src: hlSrc, ids: [...hl] }); } catch (_) {} };
+/* which cards does card `c` point at?  An explicit "✨ #12 #34 …" line in the body
+   wins (lets an erg name exactly the cards to light); else every "#123" in
+   title+body that is a live card — skipping PR/issue-number look-alikes
+   ("PR #1222", "skills#1222", "srv #21147") — plus the card's outgoing ref links. */
+function mentionedIds(c) {
+  const out = new Set();
+  const ok = (id) => id !== c.id && CARDS.has(id) && visible(CARDS.get(id));
+  const body = c.body || '';
+  const ex = body.match(/^\s*✨[^\n]*/m);
+  const text = ex ? ex[0] : (c.title || '') + '\n' + body;
+  const re = ex ? /#(\d+)/g
+    : /(?<![\w/#])(?<!(?:PR|PRs|pull|skills|srv|cli|kb|configs|issue|ticket|APPS-|SYS-|ENG-|PO-)\s?)#(\d{1,5})\b/gi;
+  for (const m of text.matchAll(re)) { const id = +m[1]; if (ok(id)) out.add(id); }
+  if (!ex) for (const l of LINKS) if (l.parent === c.id && l.kind === 'ref' && ok(l.child)) out.add(l.child);
+  return [...out];
+}
+function toggleHl(c) {
+  if (hlSrc === c.id) {                        // pressed again → off
+    hl.clear(); hlSrc = null; saveHl(); uiSync(); toast('✨ highlight off'); return; }
+  const ids = mentionedIds(c);
+  if (!ids.length) { toast('⚠ #' + c.id + ' mentions no live cards'); return; }
+  hl.clear(); for (const id of ids) hl.add(id); hlSrc = c.id; saveHl();
+  uiSync();
+  pushBack(); fitTo(ids.map((id) => CARDS.get(id)));   // show them all; ← back restores the view
+  toast('✨ ' + ids.length + ' card' + (ids.length > 1 ? 's' : '') + ' highlighted — press ✨ again to clear');
+}
 /* expanded cards persist across reloads (operator directive 2026-07-29, #295): render
    write-throughs the set; boot restores it (re-selecting too, since render
    collapses any expanded card that isn't selected). */
@@ -1043,7 +1119,7 @@ function render() {
     const fresh = seen && !seen.has(c.id);
     const cls = ['node', 'k-' + c.kind, 'st-' + c.status,
       c.status === 'archived' ? 'arch' : '', sel.has(c.id) ? 'sel' : '',
-      hits.has(c.id) ? 'hit' : '',
+      hits.has(c.id) ? 'hit' : '', hl.has(c.id) ? 'hl' : '',
       fresh ? 'fresh' : '',
       expanded.has(c.id) ? 'open' : ''].join(' ');   // open = showing in the side panel (#51)
     if (c.kind === 'header') {           // big-font section title, no chrome (#425)
@@ -1090,6 +1166,7 @@ function render() {
   renderPanel();
   updateBars();
   perfRender(performance.now() - perfT0);    // perf graph (#2549)
+  mxKick();                                  // matrix runs only while an erg's card is painted (#3248)
 }
 
 /* ---- jet-HUD stream (#988): poll /hud while any erg runs; paint the tails
@@ -1223,13 +1300,28 @@ function drawHudContent(rows, cssW, cssH) {                // rasterize the .hl 
   }
   return cnv;
 }
-let hudRaf = 0, hudFrame = 0;
-function hudLoopStart() { if (NOISE && !hudRaf) hudRaf = requestAnimationFrame(hudLoop); }
+/* rAF registry (operator directive 2026-09-06 #3248 'are we render-looping?'): every animation loop
+   registers while it has a frame requested; the title-bar badge #rafi shows the live
+   set ('▶ mx' / '▶ hud') or '◦' = idle, no frames requested. */
+const RAFS = new Set();
+function rafOn(n) { if (!RAFS.has(n)) { RAFS.add(n); rafBadge(); } }
+function rafOff(n) { if (RAFS.delete(n)) rafBadge(); }
+function rafBadge() {
+  const el = $('rafi'); if (!el) return;
+  const ls = [...RAFS].join('+');
+  el.textContent = RAFS.size ? '▶ ' + ls : '◦';
+  el.classList.toggle('on', RAFS.size > 0);
+  el.title = RAFS.size ? 'requestAnimationFrame loop running: ' + ls : 'idle — no animation frames requested';
+}
+let hudRaf = 0, hudFrame = 0, hudFresh = false;
+function hudLoopStart() { if (NOISE && !hudRaf) { hudFresh = true; hudRaf = requestAnimationFrame(hudLoop); rafOn('hud'); } }
 function hudLoop(ts) {
   hudRaf = 0;
   const els = world.querySelectorAll('canvas.hud');
-  if (!els.length) return;                                 // self-stop; paintHuds restarts
+  if (!els.length) { rafOff('hud'); return; }              // self-stop; paintHuds restarts
   hudRaf = requestAnimationFrame(hudLoop);
+  if (hudFresh) { hudFresh = false; PERF.reset(); }        // don't log the idle gap as a stall
+  PERF.tick(ts);
   if (hudFrame++ & 1) return;                              // ~30fps is plenty for clouds
   for (const el of els) {
     const id = +el.dataset.erg;
@@ -1301,7 +1393,7 @@ const MXDPR = Math.min(2, devicePixelRatio || 1);
 const MXGL = (() => {
   try {
     const cnv = $('mxbg');
-    const gl = cnv.getContext('webgl', { alpha: false, antialias: false, depth: false });
+    const gl = cnv.getContext('webgl', { alpha: true, premultipliedAlpha: true, antialias: false, depth: false });
     if (!gl) return null;
     /* glyph atlas: 8×8 cells of 64px — 62 matrix glyphs + cell 63 = soft disc (halo) */
     const at = document.createElement('canvas'); at.width = at.height = 512;
@@ -1324,7 +1416,7 @@ const MXGL = (() => {
       'void main(){vec2 cl=vec2(mod(vg,8.),floor(vg/8.));' +
       'float al=texture2D(tex,(cl+gl_PointCoord)/8.).a;' +
       'vec3 col=mix(vec3(.20,.72,.40),vec3(.82,1.,.86),vb.y);' +
-      'gl_FragColor=vec4(col*al*vb.x,1.);}';                 // additive: color only
+      'float a=al*vb.x;gl_FragColor=vec4(col*a,a);}';        // premultiplied: composites OVER the cards
     const mk = (ty, src) => { const s = gl.createShader(ty); gl.shaderSource(s, src); gl.compileShader(s);
       if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s)); return s; };
     const pr = gl.createProgram();
@@ -1346,8 +1438,8 @@ const MXGL = (() => {
     gl.enableVertexAttribArray(la); gl.vertexAttribPointer(la, 4, gl.FLOAT, false, 24, 0);
     gl.enableVertexAttribArray(lb); gl.vertexAttribPointer(lb, 2, gl.FLOAT, false, 24, 16);
     const ur = gl.getUniformLocation(pr, 'res');
-    gl.enable(gl.BLEND); gl.blendFunc(gl.ONE, gl.ONE);       // additive over the bg
-    gl.clearColor(13 / 255, 16 / 255, 20 / 255, 1);          // == --bg
+    gl.enable(gl.BLEND); gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);   // premultiplied 'over'
+    gl.clearColor(0, 0, 0, 0);                               // transparent — page shows through
     const pmax = gl.getParameter(gl.ALIASED_POINT_SIZE_RANGE)[1] || 64;
     return { cnv, gl, ur, pmax };
   } catch (_) { return null; }
@@ -1355,15 +1447,32 @@ const MXGL = (() => {
 function mxOn() { return MX && !!MXGL; }
 const MXBUF = new Float32Array(4096 * 6);
 const MXP = [];                                              // particle pool
-function mxSpawn() {
-  const W = innerWidth, H = innerHeight, s = Math.random() * 2 * (W + H);
+/* flocking v2 (operator directive 2026-09-06 #3242): (a) a glyph is near-invisible at its
+   border spawn and blooms as it nears its target — visibility = f(d / d0),
+   d0 = its own spawn distance; (b) streams "flock": per target ≤3 remembered
+   border GATES (78% of spawns re-enter through one ± jitter, lanes drift
+   slowly) + boids alignment/cohesion among same-target neighbours (56 px
+   spatial hash) → a few braided rivers instead of a homogeneous spray. */
+const MXGATE = [];                                           // per target idx: [{s}] border params
+let mxNtg = 0;
+function mxSpawn(ntg) {
+  const W = innerWidth, H = innerHeight, P = 2 * (W + H);
+  const ti = (Math.random() * 4096) | 0;
+  let s = Math.random() * P;
+  if (ntg) {
+    const g = MXGATE[ti % ntg] || (MXGATE[ti % ntg] = []);
+    if (g.length && Math.random() < .78)
+      s = ((g[(Math.random() * g.length) | 0].s + (Math.random() - .5) * .05 * P) % P + P) % P;
+    else if (g.length < 3) g.push({ s });
+    else if (Math.random() < .008) g[(Math.random() * g.length) | 0].s = s;   // lane drift
+  }
   let x, y;
   if (s < W) { x = s; y = -10; }
   else if (s < W + H) { x = W + 10; y = s - W; }
   else if (s < 2 * W + H) { x = s - W - H; y = H + 10; }
   else { x = -10; y = s - 2 * W - H; }
-  return { x, y, vx: 0, vy: 0, g: (Math.random() * 62) | 0, age: 0,
-    ti: (Math.random() * 4096) | 0, sd: Math.random() * 6.28,
+  return { x, y, vx: 0, vy: 0, g: (Math.random() * 62) | 0, age: 0, d0: 0, v: 1, pr: .5,
+    ti, sd: Math.random() * 6.28,
     spd: 140 + Math.random() * 110, sz: 9.5 + Math.random() * 4, tr: [] };
 }
 /* screen-space targets: one per running erg (clamped into view if offscreen).
@@ -1389,44 +1498,80 @@ function mxTargets() {
   return out;
 }
 let mxRaf = 0, mxLast = 0, mxTick = 0;
+/* allocation-free neighbour grid (erg 1299): typed-array cell heads + next-links, reused
+   every frame — the v2 per-frame Map/arrays were a GC-hiccup suspect (the operator #3248 'stutter') */
+let mxCH = null, mxCols = 0, mxRows = 0;
+const mxNX = new Int32Array(4096);
 function mxLoop(ts) {
   mxRaf = 0;
-  if (!mxOn()) return;                                       // mxApply restarts
-  mxRaf = requestAnimationFrame(mxLoop);
+  if (!mxOn()) { rafOff('mx'); return; }                     // mxApply/mxKick restart
   const { cnv, gl, ur, pmax } = MXGL;
   const bw = innerWidth * MXDPR | 0, bh = innerHeight * MXDPR | 0;
   if (cnv.width !== bw || cnv.height !== bh) {
     cnv.width = bw; cnv.height = bh; gl.viewport(0, 0, bw, bh); gl.uniform2f(ur, bw, bh);
   }
-  const dt = Math.min(.05, (ts - mxLast) / 1000 || .016); mxLast = ts; mxTick++;
   const tg = mxTargets();
-  const want = tg.length ? Math.min(500, 120 + 140 * tg.length) : 130;
-  for (let k = 0; k < 8 && MXP.length < want; k++) MXP.push(mxSpawn());
-  const H = innerHeight;
+  if (!tg.length) {
+    /* nothing erg'ing (or its card not painted yet) → the whole system is OFF (the operator #3248):
+       clear the layer, drop the pool, request NO more frames. render() re-kicks it. */
+    MXP.length = 0; MXGATE.length = 0; mxNtg = 0; mxLast = 0;
+    gl.clear(gl.COLOR_BUFFER_BIT); rafOff('mx'); return;
+  }
+  mxRaf = requestAnimationFrame(mxLoop); rafOn('mx');
+  if (!mxLast) PERF.reset();                                 // fresh start: the idle gap is not a stall
+  PERF.tick(ts);
+  const dt = Math.min(.05, (ts - mxLast) / 1000 || .016); mxLast = ts; mxTick++;
+  if (tg.length !== mxNtg) { MXGATE.length = 0; mxNtg = tg.length; }   // target set changed → new lanes
+  const want = Math.min(500, 120 + 140 * tg.length);
+  for (let k = 0; k < 8 && MXP.length < want; k++) MXP.push(mxSpawn(tg.length));
+  /* spatial hash (56 px cells) for the boids pass — same-target neighbours only */
+  const CS = 56, cols = Math.ceil(innerWidth / CS) + 4, rows = Math.ceil(innerHeight / CS) + 4;
+  if (cols !== mxCols || rows !== mxRows) { mxCols = cols; mxRows = rows; mxCH = new Int32Array(cols * rows); }
+  mxCH.fill(-1);
+  const cix = (p) => { const cx = Math.floor(p.x / CS) + 2, cy = Math.floor(p.y / CS) + 2;
+    return (cx < 0 || cy < 0 || cx >= cols || cy >= rows) ? -1 : cy * cols + cx; };
+  for (let i = 0; i < MXP.length; i++) {
+    const k = cix(MXP[i]); if (k < 0) { mxNX[i] = -1; continue; }
+    mxNX[i] = mxCH[k]; mxCH[k] = i;
+  }
   for (let i = MXP.length - 1; i >= 0; i--) {
     const p = MXP[i];
-    const t = tg.length ? tg[p.ti % tg.length] : null;
+    const t = tg[p.ti % tg.length];
     let dead = false;
-    if (t) {
-      const dx = t.x - p.x, dy = t.y - p.y, d = Math.hypot(dx, dy) || 1;
-      if (d < t.r * .55 + 10 || p.age > 16) dead = true;
-      else {
-        /* steer at the target + a perpendicular sway → living, braided streams */
-        const wob = Math.sin(p.age * 2.1 + p.sd) * .35;
-        const ux = dx / d, uy = dy / d;
-        const dvx = (ux - uy * wob) * p.spd, dvy = (uy + ux * wob) * p.spd;
-        const m = Math.min(1, dt * 2.4);
-        p.vx += (dvx - p.vx) * m; p.vy += (dvy - p.vy) * m;
+    const dx = t.x - p.x, dy = t.y - p.y, d = Math.hypot(dx, dy) || 1;
+    if (d < t.r * .55 + 10 || p.age > 16) dead = true;
+    else {
+      /* (a) visibility grows as the glyph closes on its target: d0 = own spawn distance */
+      if (d > p.d0) p.d0 = d;
+      p.pr = 1 - d / p.d0;                                   // 0 at spawn → 1 at arrival
+      p.v = .07 + .93 * Math.pow(p.pr, 1.7);
+      /* (b) flock: alignment + cohesion with ≤14 same-target neighbours within CS px */
+      let ux = dx / d, uy = dy / d, ax = 0, ay = 0, sx = 0, sy = 0, nn = 0;
+      const k0 = cix(p), mine = p.ti % tg.length;
+      if (k0 >= 0) for (let oy = -1; oy <= 1 && nn < 14; oy++) for (let ox = -1; ox <= 1 && nn < 14; ox++) {
+        const cx = k0 % cols + ox, cy = (k0 / cols | 0) + oy;
+        if (cx < 0 || cy < 0 || cx >= cols || cy >= rows) continue;
+        for (let j = mxCH[cy * cols + cx]; j >= 0 && nn < 14; j = mxNX[j]) {
+          if (j === i) continue;
+          const q = MXP[j]; if (!q || q.ti % tg.length !== mine) continue;   // !q: pool shrank this frame
+          const ex = q.x - p.x, ey = q.y - p.y; if (ex * ex + ey * ey > CS * CS) continue;
+          ax += q.vx; ay += q.vy; sx += ex; sy += ey; nn++;
+        }
       }
-    } else {                                                 // ambient rain
-      const m = Math.min(1, dt * 2);
-      p.vx += (Math.sin(p.age * .9 + p.sd) * 16 - p.vx) * m;
-      p.vy += (p.spd * .38 - p.vy) * m;
-      if (p.y > H + 20 || p.age > 30) dead = true;
+      if (nn) {
+        const al = Math.hypot(ax, ay) || 1;
+        ux += .7 * ax / al + .5 * sx / nn / CS; uy += .7 * ay / al + .5 * sy / nn / CS;
+        const ul = Math.hypot(ux, uy) || 1; ux /= ul; uy /= ul;
+      }
+      /* steer + a small perpendicular sway → living, braided streams */
+      const wob = Math.sin(p.age * 2.1 + p.sd) * .18;
+      const dvx = (ux - uy * wob) * p.spd, dvy = (uy + ux * wob) * p.spd;
+      const m = Math.min(1, dt * 2.4);
+      p.vx += (dvx - p.vx) * m; p.vy += (dvy - p.vy) * m;
     }
     if (dead) {
       if (MXP.length > want) MXP.splice(i, 1);
-      else MXP[i] = mxSpawn();
+      else MXP[i] = mxSpawn(tg.length);
       continue;
     }
     p.x += p.vx * dt; p.y += p.vy * dt; p.age += dt;
@@ -1443,25 +1588,34 @@ function mxLoop(ts) {
   const tsec = ts / 1000;
   for (const t of tg) {
     const br = .5 + .5 * Math.sin(tsec * 2.2 + t.x * .01);   // breathe
-    put(t.x, t.y, t.r * 2.6, 63, (t.edge ? .5 : .30) + .12 * br, .25);
-    put(t.x, t.y, t.r * 1.2, 63, (t.edge ? .40 : .22) + .10 * br, .55);
+    /* halo now paints OVER the card (z10) — trimmed vs the old behind-the-card additive */
+    put(t.x, t.y, t.r * 2.6, 63, (t.edge ? .5 : .20) + .10 * br, .25);
+    put(t.x, t.y, t.r * 1.2, 63, (t.edge ? .40 : .15) + .08 * br, .55);
   }
   for (const p of MXP) {
+    const sz = p.sz * (.85 + .3 * p.pr);                     // grows a touch as it arrives
     for (let k = 2; k < p.tr.length; k += 2)                 // trail (skip newest = head pos)
-      put(p.tr[k], p.tr[k + 1], p.sz * .92, (p.g * 3 + k * 5) % 62,
-        .34 * (1 - k / p.tr.length), .12);
-    put(p.x, p.y, p.sz, p.g, .8, .72);                       // bright head
+      put(p.tr[k], p.tr[k + 1], sz * .92, (p.g * 3 + k * 5) % 62,
+        .34 * (1 - k / p.tr.length) * p.v, .12);
+    put(p.x, p.y, sz, p.g, .8 * p.v, .72);                   // bright head, dim when far
   }
   gl.clear(gl.COLOR_BUFFER_BIT);
   gl.bufferSubData(gl.ARRAY_BUFFER, 0, MXBUF.subarray(0, n * 6));
   gl.drawArrays(gl.POINTS, 0, n);
+}
+/* (re)start the loop only when something is erg'ing; called from mxApply and from the
+   tail of every render() (the erg's card becomes a target the moment it is painted) */
+function mxKick() {
+  if (!mxOn() || mxRaf) return;
+  if (!ERGS.some((e) => e.status === 'running' && e.alive && e.info_card)) return;
+  mxLast = 0; mxRaf = requestAnimationFrame(mxLoop); rafOn('mx');
 }
 function mxApply() {
   const b = $('mx');
   b.classList.toggle('on', mxOn());
   b.style.display = MXGL ? '' : 'none';                      // no WebGL → legacy HUD, no guard
   $('mxbg').style.display = mxOn() ? '' : 'none';
-  if (mxOn() && !mxRaf) { mxLast = 0; mxRaf = requestAnimationFrame(mxLoop); }
+  mxKick();
 }
 $('mx').onclick = () => {
   MX = !MX;
@@ -1485,6 +1639,7 @@ function uiSync() {
     const id = +el.dataset.id;
     el.classList.toggle('sel', sel.has(id));
     el.classList.toggle('hit', hits.has(id));
+    el.classList.toggle('hl', hl.has(id));
     const open = expanded.has(id);
     el.classList.toggle('open', open);
     if (seen && seen.has(id) && el.classList.contains('fresh')) {  // touched → glow off now
@@ -1527,6 +1682,7 @@ function renderPanel() {
         <span>${esc(c.kind)}${iu}${lk}</span>
         <span class="pbtns">
           ${c.url ? `<button data-act="url" data-url="${esc(c.url)}" title="open link">↗</button>` : ''}
+          <button data-act="hl" class="${hlSrc === c.id ? 'on' : ''}" title="${hlSrc === c.id ? 'highlight is ON for this card — press to clear' : 'highlight the cards this card mentions (#ids / ✨ line + refs); press again to clear'}">✨</button>
           <button data-act="find" title="center the board on this card">◎</button>
           <button data-act="new" title="mark as new again (like gmail's unread) &amp; close">✦</button>
           <button data-act="edit" title="edit this card">✏️</button>
@@ -1573,6 +1729,7 @@ $('panel').addEventListener('click', (e) => {
   switch (b.dataset.act) {
     case 'url': openTab(b.dataset.url); break;
     case 'find': if (c) { pushBack(); centerOn(c); } break;
+    case 'hl': if (c) toggleHl(c); break;                 // ✨ (operator directive 2026-09-06, #3210)
     case 'edit': if (c) openEditor(c); break;
     case 'close': expanded.delete(id); saveExp(); uiSync(); break;
     /* mark as new again (operator directive 2026-08-01) — gmail-style "mark unread":
@@ -2199,7 +2356,7 @@ async function setStatus(pick, st, label) {
    PR/threads) with questions hung beneath it. The erg that answers a question
    must put meaty changes ON THE STATUS CARD (the only context future ergs on
    it will see) and reply tersely in its output card. The editor's
-   "save + 🎯 ask + ⚡ erg" button (edSaveGo(true, true)) appends this block
+   "＋ inject prompt…" dropdown (#3234; was the "save + 🎯 ask + ⚡ erg" button) appends this block
    so the operator never types it. (✓ done abar button retired #2636; the interim
    abar 🎯 button retired #2648.) */
 const ASK_MARK = '━━ STATUS-CARD ASK';
@@ -2212,7 +2369,32 @@ const ASK_BLOCK = ASK_MARK + ' (the operator\'s protocol, #2636) ━━\n' +
   '• your output card = terse, on-point answer + one line per change made to the status card ' +
   '("status card: updated X · added link Y") — nothing durable here\n' +
   '• nothing to change → say so in one line';
-$('ed-saveask').onclick = () => edSaveGo(true, true);
+/* 🧑‍🏭 turk brief (operator directive 2026-09-06, #3234): "outsource to a human — me" —
+   the erg builds an HTML hand-off page that wraps the human in exactly the
+   context they need to do the one thing only they can do. */
+const TURK_MARK = '━━ TURK BRIEF';
+const TURK_BLOCK = TURK_MARK + ' (the operator\'s protocol, #3234) ━━\n' +
+  'Treat this card as a task to OUTSOURCE TO A HUMAN (the operator), Mechanical-Turk style. Build ONE self-contained HTML page ' +
+  'on the operator\'s report shelf (reuse an existing briefing page\'s CSS) and put its link in the output card\'s url. The page:\n' +
+  '• HIT header: task in one sentence · the operator\'s time (read + answer) · why a human is needed (approval / judgment / access) · deadline or "none hard"\n' +
+  '• context for someone picking it up COLD: the one-liner · cast (who + role, ≤5 rows) · what the artifact is in one breath · timeline strip\n' +
+  '• current state VERIFIED LIVE this erg (table: thing · state · link) — never from memory\n' +
+  '• the artifact itself in full (draft message / diff / decision matrix), as-agent voice, superseding older drafts by name\n' +
+  '• "What I need from you": 2–4 options as words to type back (A/B/C/D, one marked RECOMMENDED) + the ≤3 checks that actually matter\n' +
+  '• "What happens after" per option; a footer naming sources; nothing sent/changed externally\n' +
+  '• output card = title one line, body = link + the options list; rate imp by money impact, urg by deadline';
+/* ＋ inject dropdown (replaces the "save + 🎯 ask + ⚡ erg" button, #3234):
+   choosing an entry appends its block once (marker-guarded) and resets the
+   select; the operator then presses save + ⚡ erg. Several can be stacked. */
+const INJECTS = { ask: [ASK_MARK, ASK_BLOCK], turk: [TURK_MARK, TURK_BLOCK] };
+$('ed-inject').onchange = () => {
+  const sel = $('ed-inject'), inj = INJECTS[sel.value]; sel.value = '';
+  if (!inj) return;
+  const ta = $('ed-body');
+  if (ta.value.includes(inj[0])) { toast('already injected'); return; }
+  ta.value = (ta.value.trimEnd() + '\n\n' + inj[1]).trimStart();
+  toast('injected ' + sel.options[[...sel.options].findIndex(o => INJECTS[o.value] === inj)].text);
+};
 $('a-arch').onclick = () => setStatus((c) => c.status !== 'archived', 'archived', 'archived 📥');
 $('a-unarch').onclick = () => setStatus((c) => c.status === 'archived', 'done', 'un-archived (done)');
 $('a-erg').onclick = async () => {
@@ -2371,20 +2553,22 @@ const PERF = (() => {
       'ms (' + renders + ' renders since load)\n' +
       'green <33ms · yellow <100ms · red ≥100ms · white tick = render() ran there';
   }
-  function loop(ts) {
-    requestAnimationFrame(loop);
+  /* PASSIVE since erg 1299 (the operator #3248 'are we render-looping?'): no rAF loop of its own.
+     The live animation loops (matrix, hud) call tick(ts) per frame; an idle page requests
+     zero frames. reset() at a loop start keeps the idle gap from logging as a stall. */
+  function tick(ts) {
     const gap = last ? ts - last : 0; last = ts;
-    if (gap <= 0 || gap > 1500) return;                  // boot / tab-hidden
+    if (gap <= 0 || gap > 1500) return;                  // (re)start / tab-hidden
     const i = advance(ts);
     if (gap > gaps[i]) gaps[i] = gap;
     if (bkt(ts) !== bkt(ts - gap) || gap > 100) draw();  // redraw ~2/s or on a spike
   }
-  requestAnimationFrame(loop);
-  return { render(ms) {                                  // called from render()
+  return { tick, reset() { last = 0; }, render(ms) {    // render(ms) called from render()
     lastRender = ms; renders++;
     const i = advance(performance.now());
     if (ms > rnds[i]) rnds[i] = ms;
     if (ms > gaps[i]) gaps[i] = ms;                      // render ran sync — it IS the gap
+    draw();                                              // idle page still shows its renders
   } };
 })();
 function perfRender(ms) { PERF.render(ms); }
@@ -2532,7 +2716,10 @@ document.addEventListener('keydown', (e) => {
   // expanded card that isn't selected, so re-select them too (#295)
   try { for (const id of JSON.parse(localStorage.{{AGENT_NAME}}Exp || '[]'))
     if (Number.isInteger(id)) { expanded.add(id); sel.add(id); } } catch (_) {}
+  try { const h = JSON.parse(localStorage.{{AGENT_NAME}}Hl || 'null');   // ✨ highlight survives reloads (#3210)
+    if (h && Number.isInteger(h.src)) { hlSrc = h.src; for (const id of h.ids || []) hl.add(id); } } catch (_) {}
   await poll();
+  if (hlSrc != null && !CARDS.has(hlSrc)) { hl.clear(); hlSrc = null; saveHl(); }
   // drop restored ids whose cards no longer exist (archived-away, deleted)
   for (const id of [...expanded]) if (!CARDS.has(id)) { expanded.delete(id); sel.delete(id); }
   // seen-set (#372) is server-side since #971. Unseeded server → one-time
