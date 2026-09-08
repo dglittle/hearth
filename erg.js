@@ -32,6 +32,7 @@ process.on('warning', (w) => { if (w.name !== 'ExperimentalWarning') console.err
 const fs = require('fs'), path = require('path'), os = require('os'), crypto = require('crypto');
 const { spawn, spawnSync } = require('child_process');
 const { DatabaseSync } = require('node:sqlite');
+const ctxm = require('./tools/ctx.js');   // prompt-size + per-call context measurement (card #3440)
 
 const HOME = __dirname;
 const DB_PATH = process.env.CARDS_DB || path.join(HOME, 'db', 'cards.db');
@@ -400,6 +401,7 @@ function modelAllowed(tok, model) {
 // sandbox retest). SIGKILL from outside remains the dirty path (reaper).
 let CHILD = null, STOPPED = false;
 let RESUMED = false, SYS_USED = '';   // warm-resume state for finalize (card #756)
+let PROMPT_USED = '';                 // the fired user prompt (size bookkeeping, card #3440)
 function killChildTree(sig) {
   if (!CHILD) return;
   try { process.kill(-CHILD.pid, sig); }         // whole group (claude is a group leader)
@@ -527,6 +529,7 @@ function runClaude(args, env, promptText) {
     // tail the live transcript while we run (HUD overlay — operator directive 2026-08-06, #988)
     try { db.prepare('UPDATE ergs SET sid = ? WHERE id = ?').run(sid, ERG); } catch (_) {}
     RESUMED = isResume; SYS_USED = isResume ? resume.sys : sysPrompt;
+    PROMPT_USED = isResume ? resumePrompt : prompt;
     log('erg #' + ERG + ' begins ' + sid + (isResume ? ' [♨ RESUME]' : '') +
       ' [cards #' + parents.join(',#') + ' → out #' + outCard + ']' +
       (model !== MODEL ? ' [' + model + (isResume ? ' — session model' : ' — fable budget dry') + ']' : '') +
@@ -659,13 +662,31 @@ async function finalize(ok, res, r, t0, ran, sid, tokSlot = 1, model = MODEL) {
     .replace(/\n/g, ' ').slice(0, 300);
   if (STOPPED && !ok) resultLine = '⛔ stopped from the board (SIGTERM)';
 
-  // costs table (the claude-p cost log — silent ledger, no UI panel)
+  // prompt size + per-call context (operator directive 2026-09-06, card #3440): chars of the
+  // system prompt (by section) and the fired user prompt (ancestor dump split
+  // out), plus — from the transcript — the context the model actually saw on
+  // every API call of THIS erg (window = t0..now; a ♨ resumed session's earlier
+  // calls are excluded, its ctx[0] then IS the inherited conversation).
+  let pm = null;
   if (ran) try {
-    db.prepare(`INSERT OR REPLACE INTO costs(erg_id,wall_seconds,model,input_tokens,output_tokens,cache_read,cache_write,usd)
-                VALUES(?,?,?,?,?,?,?,?)`).run(
+    const up = ctxm.userParts(PROMPT_USED);
+    const tr = (sid && sid !== 'no-session') ? ctxm.ctxFromTranscript(transcriptPath(sid), new Date(t0).toISOString(), null) : null;
+    pm = { sys: SYS_USED.length, sysParts: ctxm.sysParts(SYS_USED), user: up.chars, anc: up.anc,
+      ctx: tr && tr.ctx.length ? tr.ctx : null };
+  } catch (e) { log('prompt-size measure failed: ' + e.message); }
+
+  // costs table (the claude-p cost log — the board's panel foot reads it via /cost)
+  if (ran) try {
+    for (const col of ['sys_chars INTEGER', 'sys_parts TEXT', 'prompt_chars INTEGER', 'anc_chars INTEGER', 'ctx TEXT'])
+      try { db.exec('ALTER TABLE costs ADD COLUMN ' + col); } catch (_) {}   // migration (#3440)
+    db.prepare(`INSERT OR REPLACE INTO costs(erg_id,wall_seconds,model,input_tokens,output_tokens,cache_read,cache_write,usd,
+                  sys_chars,sys_parts,prompt_chars,anc_chars,ctx)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
       ERG, (Date.now() - t0) / 1000, model,
       u ? (u.input_tokens || 0) : null, u ? (u.output_tokens || 0) : null,
-      u ? (u.cache_read_input_tokens || 0) : null, u ? (u.cache_creation_input_tokens || 0) : null, usd);
+      u ? (u.cache_read_input_tokens || 0) : null, u ? (u.cache_creation_input_tokens || 0) : null, usd,
+      pm ? pm.sys : null, pm ? JSON.stringify(pm.sysParts) : null, pm ? pm.user : null, pm ? pm.anc : null,
+      pm && pm.ctx ? JSON.stringify(pm.ctx) : null);
   } catch (e) { log('costs write failed: ' + e.message); }
 
   // erg row → done/failed + release every lock this erg still holds
@@ -698,7 +719,9 @@ async function finalize(ok, res, r, t0, ran, sid, tokSlot = 1, model = MODEL) {
         const status = c.status;   // 'ready' retired 2026-07-28: 'draft' IS the live status, no flip needed
         const costLine = '\n\n⏱ ' + fmtDur(Date.now() - t0) + (RESUMED ? ' · ♨ resumed' : '') + ' · ' + model +
           (tok ? ' · ' + fmtTok(tok.in + tok.cached) + ' in (' + fmtTok(tok.cached) + ' cached) / ' + fmtTok(tok.out) + ' out' : '') +
-          (usd != null ? ' · $' + usd.toFixed(2) : '');
+          (usd != null ? ' · $' + usd.toFixed(2) : '') +
+          (pm ? ' · prompt ' + fmtTok(pm.sys) + '+' + fmtTok(pm.user) + ' ch' : '') +
+          (pm && pm.ctx ? ' · ctx ' + fmtTok(pm.ctx[0]) + '→' + fmtTok(Math.max(...pm.ctx)) + ' tok/' + pm.ctx.length + ' calls' : '');
         db.prepare('UPDATE cards SET title = ?, status = ?, body = ?, updated_at = ? WHERE id = ?')
           .run(title, status, String(c.body || '') + costLine, nowIso(), outCard);
       }

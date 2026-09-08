@@ -376,10 +376,25 @@ const commands = {
     db.prepare('UPDATE ergs SET status = ?, ended_at = ?, result = ? WHERE id = ?')
       .run(st, now(), flags.result !== undefined ? String(flags.result) : null, id);
     const r = db.prepare('UPDATE cards SET lock_erg = NULL, lock_at = NULL, updated_at = ? WHERE lock_erg = ?').run(now(), id);
+    const renewed = unseeOutputCard(db, id);
     db.exec('COMMIT');
-    emit({ erg: id, status: st, released: r.changes }, `erg:${id} ${st}; released ${r.changes} lock(s)`);
+    emit({ erg: id, status: st, released: r.changes, renewed },
+      `erg:${id} ${st}; released ${r.changes} lock(s)` + (renewed ? `; card #${renewed} ✦ new again` : ''));
   },
 };
+
+/* An erg finishing (done OR failed) makes its output card ✦ new again (operator
+   directive 2026-09-06): the operator often opens the card mid-erg to watch it,
+   which marks it seen — dropping it from the board's server-side seen-set here
+   restores the gold "new" state so the finish is noticed. Idempotent; the seen
+   table is the board server's (same db) — created here too so a fresh home works. */
+function unseeOutputCard(db, ergId) {
+  db.exec('CREATE TABLE IF NOT EXISTS seen (id INTEGER PRIMARY KEY)');
+  const e = db.prepare('SELECT info_card FROM ergs WHERE id = ?').get(ergId);
+  if (!e || !e.info_card) return null;
+  db.prepare('DELETE FROM seen WHERE id = ?').run(e.info_card);
+  return e.info_card;
+}
 
 // ---- archive-thread internals (kept in sync with web/server.js) ----
 // Closure = ancestors(start) ∪ descendants(start) over 'child' links — DIRECTIONAL,
@@ -485,6 +500,7 @@ function reap(db) {
       .run(now(), h.id, h.lock_erg);
     db.prepare(`UPDATE ergs SET status = 'failed', ended_at = COALESCE(ended_at, ?)
                 WHERE id = ? AND status = 'running'`).run(now(), h.lock_erg);
+    unseeOutputCard(db, h.lock_erg);           // reaped erg = finished too → its card ✦ new again
     db.exec('COMMIT');
     reaped.push({ id: h.id, erg: h.lock_erg, reason: dead ? 'pid dead' : 'stale' });
   }

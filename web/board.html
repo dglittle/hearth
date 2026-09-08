@@ -234,6 +234,21 @@
   .pcard .txt a, .pcard .txt code { color:#8fb8e8; }
   .pcard .txt code { background:#0d1014; padding:0 3px; border-radius:3px; color:#c9a86a; }
   .pcard .meta { margin-top:8px; font-size:10.5px; color:#5c6875; }
+  /* 💸 cost breakdown at the panel foot (operator directive 2026-09-06, #3440): prompt size
+     (system-prompt sections + fired input + ancestor dump) as a stacked bar,
+     context-per-call sparkline, thread prompt-history sparkline. */
+  .pcard .pcost { margin-top:8px; padding-top:6px; border-top:1px dashed #2a323c; font-size:10.5px;
+    color:#7d8a98; line-height:1.6; }
+  .pcard .pcost:empty { display:none; }
+  .pcard .pcost b { color:#c9a86a; font-weight:600; }
+  .pcard .pcost .row { display:flex; gap:7px; align-items:center; flex-wrap:wrap; }
+  .pcard .pcost .lbl { color:#5c6875; min-width:46px; }
+  .pcard .pcost .hi { color:#5fe3ff; }
+  .pcard .pcost svg { position:static; vertical-align:middle; flex-shrink:0; pointer-events:auto; }  /* the global svg rule above pins to the corner */
+  .pcard .pcost .stack { display:inline-flex; height:9px; width:200px; border-radius:2px; overflow:hidden;
+    vertical-align:middle; background:#1a1f25; flex-shrink:0; }
+  .pcard .pcost .stack i { display:block; height:100%; }
+  .pcard .pcost .leg { display:inline-block; width:7px; height:7px; border-radius:1px; margin:0 3px 0 1px; vertical-align:middle; }
   .node .btns { position:absolute; right:4px; top:2px; display:flex; gap:1px; }
   .node .btns button { background:none; border:none; color:var(--dim); font-size:12px; padding:1px 3px; }
   .node .btns button:hover { color:var(--ink); }
@@ -349,7 +364,7 @@
      opacity, text included. No pulse animation anymore; the shader breathes.
      pointer-events:none so the card underneath stays tappable/draggable;
      it lives inside #world so pan/zoom applies for free. */
-  .hud { position:absolute; z-index:6; pointer-events:none; border-radius:12px; }
+  .hud { position:absolute; z-index:6; pointer-events:none; border-radius:9px; }   /* = .node radius (exact fit, #3264) */
   /* .nogl = WebGL unavailable → v4 DOM fallback (opacity pulse + .hl lines) */
   @keyframes hudPulse { 0%,100% { opacity:.55; } 50% { opacity:1; } }
   .hud.nogl { background:rgba(10,26,15,.38); animation:hudPulse 1.8s ease-in-out infinite;
@@ -537,6 +552,7 @@
       <option value="">＋ inject prompt…</option>
       <option value="ask">🎯 status-card ask</option>
       <option value="turk">🧑‍🏭 turk brief (HTML hand-off)</option>
+      <option value="review">🔎 AI review round (fable + Sol)</option>
     </select>
     <button id="ed-saverg" class="go" title="save this card, then immediately fire an erg on it">save + ⚡ erg</button>
     <button id="ed-save" class="go">save</button>
@@ -1147,18 +1163,19 @@ function render() {
       (c.url ? `<button class="b-url" data-url="${esc(c.url)}" title="open link">↗</button>` : '') +
       `</div></div>`;
   }
-  /* jet-HUD overlays (#988, resized #995/#999): one per running erg, floated over
-     its output card — 70% bigger, centered. Painted last = above every node (z:6 too).
-     While the matrix background is ON it replaces these (operator directive 2026-08-30, #2443). */
+  /* jet-HUD overlays (#988): one per running erg, floated over its output card.
+     Painted last = above every node (z:6 too). Since erg 1308 (the operator #3264) they
+     are back ON alongside the matrix layer and fit the card rect EXACTLY (the
+     70%-bigger centered spill of #995/#999 is gone): the matrix glyphs land on
+     the card and the green terminal lines show what the erg is running. */
   for (const e of ERGS) {
-    if (mxOn()) break;
     if (!(e.status === 'running' && e.alive && e.info_card)) continue;
     const c = CARDS.get(e.info_card);
     if (!c || !visible(c)) continue;
     const p = pos.get(c.id) || dispPos(c);
     const tag = NOISE ? 'canvas' : 'div';        // v5: canvas + shader mask (#1014)
     html += `<${tag} class="hud${NOISE ? '' : ' nogl'}" data-erg="${e.id}" data-card="${c.id}"
-      style="left:${p.x - cw(c) * .35}px;top:${p.y - ch(c) * .35}px;width:${cw(c) * 1.7}px;height:${ch(c) * 1.7}px"></${tag}>`;
+      style="left:${p.x}px;top:${p.y}px;width:${cw(c)}px;height:${ch(c)}px"></${tag}>`;
   }
   world.innerHTML = html;
   fitZoneTitles();
@@ -1174,8 +1191,8 @@ function render() {
    5s card poll, and the payload is a few hundred bytes per running erg. ---- */
 let HUDS = new Map(), hudBusy = false;             // erg id -> {lines, gen, tt}
 async function pollHud() {
-  // matrix bg ON → no HUD overlays exist; skip the /hud stream poll (#2443)
-  const on = !mxOn() && ERGS.some((e) => e.status === 'running' && e.alive && e.info_card);
+  // HUD overlays exist in BOTH modes since erg 1308 (#3264) → poll whenever an erg runs
+  const on = ERGS.some((e) => e.status === 'running' && e.alive && e.info_card);
   if (!on) { if (HUDS.size) { HUDS = new Map(); GLY.clear(); HUDSTATE.clear(); paintHuds(); } return; }
   if (hudBusy) return;
   hudBusy = true;
@@ -1389,20 +1406,26 @@ setInterval(pollHud, 2500);
    ambient rain. Replaces the per-card green HUD overlay while ON; the 🟩
    titlebar button guards it (default on, localStorage), OFF = legacy HUD. */
 let MX = localStorage.{{AGENT_NAME}}Mx !== '0';            // default ON
+const MXMAX = 6144;                                // point budget per frame (≤500 glyphs×6 + impact fx)
 const MXDPR = Math.min(2, devicePixelRatio || 1);
 const MXGL = (() => {
   try {
     const cnv = $('mxbg');
     const gl = cnv.getContext('webgl', { alpha: true, premultipliedAlpha: true, antialias: false, depth: false });
     if (!gl) return null;
-    /* glyph atlas: 8×8 cells of 64px — 62 matrix glyphs + cell 63 = soft disc (halo) */
+    /* glyph atlas: 8×8 cells of 64px — 62 matrix glyphs + cell 62 = ring (impact shockwave) + cell 63 = soft disc (halo) */
     const at = document.createElement('canvas'); at.width = at.height = 512;
     const ax = at.getContext('2d');
     ax.font = '46px ui-monospace, Menlo, monospace';
     ax.textAlign = 'center'; ax.textBaseline = 'middle'; ax.fillStyle = '#fff';
     const AGLY = (GLYCH + '0123456789ｵﾘ01Σ7');
-    for (let i = 0; i < 63; i++)
+    for (let i = 0; i < 62; i++)
       ax.fillText(AGLY[i % AGLY.length], (i % 8) * 64 + 32, Math.floor(i / 8) * 64 + 34);
+    const rg = ax.createRadialGradient(416, 480, 0, 416, 480, 30);          // cell 62: thin soft ring
+    rg.addColorStop(0, 'rgba(255,255,255,0)'); rg.addColorStop(.64, 'rgba(255,255,255,0)');
+    rg.addColorStop(.78, 'rgba(255,255,255,.95)'); rg.addColorStop(.9, 'rgba(255,255,255,.45)');
+    rg.addColorStop(1, 'rgba(255,255,255,0)');
+    ax.fillStyle = rg; ax.fillRect(384, 448, 64, 64);
     const g = ax.createRadialGradient(480, 480, 2, 480, 480, 30);
     g.addColorStop(0, 'rgba(255,255,255,.9)'); g.addColorStop(.45, 'rgba(255,255,255,.28)');
     g.addColorStop(1, 'rgba(255,255,255,0)');
@@ -1433,7 +1456,7 @@ const MXGL = (() => {
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
     const buf = gl.createBuffer();
     gl.bindBuffer(gl.ARRAY_BUFFER, buf);
-    gl.bufferData(gl.ARRAY_BUFFER, 4096 * 6 * 4, gl.DYNAMIC_DRAW);
+    gl.bufferData(gl.ARRAY_BUFFER, MXMAX * 6 * 4, gl.DYNAMIC_DRAW);
     const la = gl.getAttribLocation(pr, 'a'), lb = gl.getAttribLocation(pr, 'b');
     gl.enableVertexAttribArray(la); gl.vertexAttribPointer(la, 4, gl.FLOAT, false, 24, 0);
     gl.enableVertexAttribArray(lb); gl.vertexAttribPointer(lb, 2, gl.FLOAT, false, 24, 16);
@@ -1445,7 +1468,7 @@ const MXGL = (() => {
   } catch (_) { return null; }
 })();
 function mxOn() { return MX && !!MXGL; }
-const MXBUF = new Float32Array(4096 * 6);
+const MXBUF = new Float32Array(MXMAX * 6);
 const MXP = [];                                              // particle pool
 /* flocking v2 (operator directive 2026-09-06 #3242): (a) a glyph is near-invisible at its
    border spawn and blooms as it nears its target — visibility = f(d / d0),
@@ -1492,12 +1515,44 @@ function mxTargets() {
     let x = (b.left + b.right) / 2, y = (b.top + b.bottom) / 2;
     const on = x > L && x < R && y > T && y < B;
     if (!on) { x = Math.min(R - 24, Math.max(L + 24, x)); y = Math.min(B - 24, Math.max(T + 24, y)); }
-    out.push({ x, y, edge: !on,
+    out.push({ x, y, edge: !on, w: b.width, h: b.height,
       r: on ? Math.max(44, Math.hypot(b.width, b.height) * .60) : 64 });
   }
   return out;
 }
 let mxRaf = 0, mxLast = 0, mxTick = 0;
+/* v5 ARRIVAL CLIMAX (operator directive 2026-09-06 #3315 'give the letters a climax when they reach their
+   destination'): a glyph that lands no longer just vanishes — it IMPACTS: its glyph freezes,
+   flares white and swells, a shockwave ring expands across the card, and a fan of sparks
+   splashes FORWARD along its travel direction; all fades in ~.7 s. Every 12th landing is a
+   BIG one (wider ring, longer, 8 sparks). Fixed pool + freelist → no per-frame allocation. */
+const MXFX = [], MXFXFREE = [], MXFX_MAX = 96;
+/* v5.1 TONED DOWN (operator directive 2026-09-06 #3317 'pretty awesome, maybe a bit intense'): erg 1333's cut
+   rang + bloomed on EVERY landing (84/190 px rings, ≤160 live) → a wash of concentric halos
+   swallowing whole cards. Now: most landings = a quiet pop (flare + 2 sparks, no ring), every
+   5th landing rings (≈55 px, inside the card), every 36th booms (≈120 px); blooms halved.
+   MXGAIN = one dial for all of it (ring size/alpha, bloom, spark count/reach): 1 ≈ the
+   original, .5 = default, 0 = flares only. Set localStorage.{{AGENT_NAME}}MxGain to taste. */
+const MXGAIN = Math.max(0, Math.min(1.5, parseFloat(localStorage.{{AGENT_NAME}}MxGain) || .5));
+/* v6 in-rect landing hazard (per second; see the landing block in mxLoop). Defaults: a glyph
+   crossing a 120-px card side at ~200 px/s pops ~90% of the time, peaking near the centre.
+   localStorage.{{AGENT_NAME}}MxLand = "edge,core" overrides (e.g. "0.4,4" = more pass-throughs). */
+const MXLAND = (localStorage.{{AGENT_NAME}}MxLand || '').split(',').map(parseFloat);
+const MXLAND_EDGE = MXLAND[0] >= 0 ? MXLAND[0] : 1, MXLAND_CORE = MXLAND[1] >= 0 ? MXLAND[1] : 4.5;
+let mxLandN = 0;
+function mxImpact(p, small) {
+  ++mxLandN;
+  const big = !small && mxLandN % 36 === 0;
+  const ring = big || (!small && mxLandN % 5 === 0);
+  let f;
+  if (MXFX.length >= MXFX_MAX) { f = MXFX[0]; MXFX[0] = MXFX[MXFX.length - 1]; MXFX.pop(); }   // recycle oldest
+  else f = MXFXFREE.pop() || {};
+  f.x = p.x; f.y = p.y; f.g = p.g; f.t = 0; f.sz = p.sz * (small ? .8 : 1);
+  f.life = big ? 1.0 : (ring ? .6 : (small ? .4 : .45)); f.big = big; f.ring = ring;
+  f.a = Math.atan2(p.vy, p.vx); f.sp = ((small ? 30 : 50) + Math.random() * 60) * (.5 + MXGAIN);
+  f.n = Math.max(1, Math.round((big ? 12 : ring ? 8 : 4) * MXGAIN)); f.seed = Math.random() * 6.28;
+  MXFX.push(f);
+}
 /* allocation-free neighbour grid (erg 1299): typed-array cell heads + next-links, reused
    every frame — the v2 per-frame Map/arrays were a GC-hiccup suspect (the operator #3248 'stutter') */
 let mxCH = null, mxCols = 0, mxRows = 0;
@@ -1539,7 +1594,21 @@ function mxLoop(ts) {
     const t = tg[p.ti % tg.length];
     let dead = false;
     const dx = t.x - p.x, dy = t.y - p.y, d = Math.hypot(dx, dy) || 1;
-    if (d < t.r * .55 + 10 || p.age > 16) dead = true;
+    /* landing v6 (operator directive 2026-09-06 #3420 'land WITHIN the rectangle, not on its side'): the
+       old rule popped a glyph the instant it crossed the inner-84% line → every impact sat
+       on a ring just inside the edge and read as "hit the wall". Now a glyph INSIDE the card
+       rect pops by chance each frame — hazard λ = MXLAND_EDGE at the border rising to
+       MXLAND_EDGE+MXLAND_CORE on the centre lines — so impacts scatter through the interior,
+       densest at the heart; the ~10% that sail out the far side get steered back (velocity
+       relaxes toward the centre) and loop around for another pass. Edge hint → radius as before */
+    let landed = false;
+    if (t.edge) landed = d < t.r * .55 + 10;
+    else {
+      const ix = 1 - Math.abs(dx) / (t.w * .46), iy = 1 - Math.abs(dy) / (t.h * .46);
+      if (ix > 0 && iy > 0)                                  // inside the card rect (inner 92%)
+        landed = Math.random() < 1 - Math.exp(-(MXLAND_EDGE + MXLAND_CORE * Math.min(ix, iy)) * dt);
+    }
+    if (landed || p.age > 16) { dead = true; if (landed) mxImpact(p, t.edge); }
     else {
       /* (a) visibility grows as the glyph closes on its target: d0 = own spawn distance */
       if (d > p.d0) p.d0 = d;
@@ -1578,19 +1647,31 @@ function mxLoop(ts) {
     if (((mxTick + i) % 9) === 0) p.g = (Math.random() * 62) | 0;   // glyph flicker
     if ((mxTick & 1) === 0) { p.tr.unshift(p.x, p.y); if (p.tr.length > 12) p.tr.length = 12; }
   }
-  /* fill the point buffer: halos first (under the glyphs), then trails + heads */
+  for (let i = MXFX.length - 1; i >= 0; i--) {                // age the impacts, swap-remove the spent
+    const f = MXFX[i]; f.t += dt;
+    if (f.t >= f.life) { MXFXFREE.push(f); MXFX[i] = MXFX[MXFX.length - 1]; MXFX.pop(); }
+  }
+  /* fill the point buffer: halos + impact rings first (under the glyphs), then trails + heads,
+     then the impact flares + sparks on top */
   let n = 0;
-  const put = (x, y, sz, gy, al, br) => { if (n >= 4096) return;
+  const put = (x, y, sz, gy, al, br) => { if (n >= MXMAX) return;
     const o = n++ * 6;
     MXBUF[o] = x * MXDPR; MXBUF[o + 1] = y * MXDPR;
     MXBUF[o + 2] = Math.min(pmax, sz * MXDPR);
     MXBUF[o + 3] = gy; MXBUF[o + 4] = al; MXBUF[o + 5] = br; };
   const tsec = ts / 1000;
   for (const t of tg) {
+    if (!t.edge) continue;                                   // visible card: no halo — just the letters + HUD (the operator #3264)
     const br = .5 + .5 * Math.sin(tsec * 2.2 + t.x * .01);   // breathe
-    /* halo now paints OVER the card (z10) — trimmed vs the old behind-the-card additive */
-    put(t.x, t.y, t.r * 2.6, 63, (t.edge ? .5 : .20) + .10 * br, .25);
-    put(t.x, t.y, t.r * 1.2, 63, (t.edge ? .40 : .15) + .08 * br, .55);
+    put(t.x, t.y, t.r * 2.6, 63, .5 + .10 * br, .25);        // offscreen erg → edge direction hint
+    put(t.x, t.y, t.r * 1.2, 63, .40 + .08 * br, .55);
+  }
+  for (const f of MXFX) {                                    // shockwave ring (1 in 5) + glow bloom (under)
+    const k = f.t / f.life, e = 1 - (1 - k) * (1 - k);       // ease-out
+    if (f.ring)                                              // at MXGAIN .5: ring 55 px / boom 120 px, alpha .35 / .55
+      put(f.x, f.y, 8 + (f.big ? 240 : 110) * MXGAIN * e, 62, (f.big ? 1.1 : .7) * MXGAIN * (1 - k) * (1 - k), .95);
+    put(f.x, f.y, f.sz * (f.big ? 8 : f.ring ? 5.2 : 3.6) * MXGAIN * (.4 + .6 * e), 63,
+      (f.big ? .8 : .44) * MXGAIN * (1 - k) * (1 - k), .8);
   }
   for (const p of MXP) {
     const sz = p.sz * (.85 + .3 * p.pr);                     // grows a touch as it arrives
@@ -1598,6 +1679,16 @@ function mxLoop(ts) {
       put(p.tr[k], p.tr[k + 1], sz * .92, (p.g * 3 + k * 5) % 62,
         .34 * (1 - k / p.tr.length) * p.v, .12);
     put(p.x, p.y, sz, p.g, .8 * p.v, .72);                   // bright head, dim when far
+  }
+  for (const f of MXFX) {                                    // impact flare + spark fan (on top)
+    const k = f.t / f.life, e = 1 - (1 - k) * (1 - k), up = Math.min(1, f.t / .12);
+    put(f.x, f.y, f.sz * (1 + (f.big ? 1.8 : 1.2) * up * (1 - k)), f.g, 1 - k, .72 + .28 * (1 - k));   // frozen glyph flares white, swells, fades
+    for (let j = 0; j < f.n; j++) {
+      const ang = f.a + (j / Math.max(1, f.n - 1) - .5) * 2.1 + Math.sin(f.seed + j * 1.7) * .15;
+      const dist = f.sp * (1 + .4 * Math.sin(f.seed * 3 + j)) * e;
+      put(f.x + Math.cos(ang) * dist, f.y + Math.sin(ang) * dist, 3 + 2 * (1 - k),
+        (f.g * 7 + j * 11) % 62, .7 * (1 - k) * (1 - k), .85);
+    }
   }
   gl.clear(gl.COLOR_BUFFER_BIT);
   gl.bufferSubData(gl.ARRAY_BUFFER, 0, MXBUF.subarray(0, n * 6));
@@ -1692,13 +1783,98 @@ function renderPanel() {
       <div class="txt">${mdFull(c.body)}</div>
       ${plinksHtml(c.id)}
       <div class="meta">${esc(tsTip)}</div>
+      <div class="pcost" data-id="${c.id}"></div>
     </div>`;
   }
   if (html !== lastPanelHtml) { $('panel').innerHTML = html; lastPanelHtml = html; }
+  fillCosts(ids);                                    // 💸 panel-foot cost breakdown (#3440)
   /* opening a (different) card = a fresh view: start at the top. The 5s poll
      leaves `ids` unchanged, so mid-read scroll position still survives. (#87) */
   const idsKey = ids.join(',');
   if (idsKey !== lastPanelIds) { $('panel').scrollTop = 0; lastPanelIds = idsKey; }
+}
+
+/* ---- 💸 cost breakdown at the panel foot (operator directive 2026-09-06, #3440) ----
+   GET /cost?id= → this card's erg(s): the prompt it was fired with (system
+   prompt by section + input + ancestor dump, chars → stacked bar) and the
+   CONTEXT the model saw on every API call (tokens, from the transcript →
+   sparkline; call 1 = the prompt in real tokens), plus the thread's history:
+   each ancestor erg's first-call context (→ second sparkline). Cached per
+   card; refetched every ~5s only while the card's erg is still running. */
+const COSTC = new Map();                 // card id → { at, data, live, pending }
+const fmtK = (n) => n == null ? '?' : n < 1000 ? String(n) : n < 1e6 ? (n / 1e3).toFixed(n < 1e4 ? 1 : 0) + 'k' : (n / 1e6).toFixed(2) + 'M';
+const fmtDurS = (s) => { s = Math.round(s || 0); return s < 60 ? s + 's' : Math.floor(s / 60) + 'm' + String(s % 60).padStart(2, '0') + 's'; };
+function spark(vals, o = {}) {           // tiny bar chart; o.hi = index to light up, o.t(i) = tooltip
+  const n = vals.length; if (!n) return '';
+  const h = o.h || 20, max = Math.max(1, ...vals);
+  const bw = Math.max(1, Math.min(6, Math.floor(((o.w || 220) - n) / n))), W = n * (bw + 1);
+  let s = `<svg width="${W}" height="${h}" viewBox="0 0 ${W} ${h}">`;
+  vals.forEach((v, i) => {
+    const bh = Math.max(1, Math.round(v / max * (h - 1)));
+    const on = o.hi === i;
+    s += `<rect x="${i * (bw + 1)}" y="${h - bh}" width="${bw}" height="${bh}" fill="${on ? '#5fe3ff' : (o.color || '#c9a86a')}" opacity="${on ? 1 : .7}"><title>${esc(o.t ? o.t(i) : String(v))}</title></rect>`;
+  });
+  return s + '</svg>';
+}
+function costHtml(d) {
+  const PC = { mind: '#8fb8e8', memories: '#c9a86a', kb: '#9ad48f', tips: '#b48ead', harness: '#5c6875', other: '#444', chain: '#e07a4f', anc: '#d94f4f' };
+  let out = '';
+  for (const r of d.ergs) {
+    const ctx = r.ctx || [];
+    const tokIn = (r.input_tokens || 0) + (r.cache_read || 0) + (r.cache_write || 0);
+    out += `<div class="row"><span class="lbl">erg</span><span>#${r.erg}${r.resumed ? ' ♨' : ''}${r.status === 'running' ? ' <span class="hi">running</span>' : r.status === 'failed' ? ' ✗' : ''}` +
+      ` · ${fmtDurS(r.wall_seconds)} · ${esc(r.model || '?')} · <b>${r.usd != null ? '$' + r.usd.toFixed(2) : '$?'}</b>` +
+      (r.input_tokens != null ? ` · ${fmtK(tokIn)} in (${fmtK(r.cache_read || 0)} cached) / ${fmtK(r.output_tokens || 0)} out` : '') + `</span></div>`;
+    if (r.sys_chars != null) {
+      const sp = r.sys_parts || {}, user = r.prompt_chars || 0, anc = r.anc_chars || 0, chain = user - anc;
+      const segs = [...Object.keys(PC).filter((k) => k in sp).map((k) => [k, sp[k]]), ['chain', chain], ['anc', anc]].filter((s) => s[1] > 0);
+      const tot = segs.reduce((a, s) => a + s[1], 0) || 1;
+      const bar = `<span class="stack" title="prompt ${fmtK(tot)} chars">` +
+        segs.map(([k, v]) => `<i style="width:${(v / tot * 100).toFixed(1)}%;background:${PC[k]}" title="${k} ${fmtK(v)} ch"></i>`).join('') + '</span>';
+      const leg = segs.map(([k, v]) => `<span class="leg" style="background:${PC[k]}"></span>${k} ${fmtK(v)}`).join(' ');
+      out += `<div class="row"><span class="lbl">prompt</span>${bar}<span><b>${fmtK(tot)}</b> ch` +
+        (ctx.length ? ` = <b>${fmtK(ctx[0])}</b> tok at call 1${r.resumed ? ' (incl. the inherited conversation)' : ''}` : '') + `</span></div>` +
+        `<div class="row" style="padding-left:53px">${leg}</div>`;
+    }
+    if (ctx.length) {
+      const peak = Math.max(...ctx);
+      out += `<div class="row"><span class="lbl">context</span>${spark(ctx, { t: (i) => 'call ' + (i + 1) + ': ' + fmtK(ctx[i]) + ' tok' })}` +
+        `<span>${fmtK(ctx[0])} → ${fmtK(peak)} tok · ${ctx.length} call${ctx.length === 1 ? '' : 's'}${r.live ? ' <span class="hi">live</span>' : ''}</span></div>`;
+    } else if (r.status !== 'running') out += `<div class="row"><span class="lbl">context</span><span>no per-call measurement for this erg</span></div>`;
+  }
+  const ch = (d.chain || []).filter((c) => c.first != null);
+  if (ch.length > 1) {
+    const mine = new Set(d.ergs.map((r) => r.erg));
+    const hi = ch.findIndex((c) => mine.has(c.erg));
+    const usd = ch.reduce((a, c) => a + (c.usd || 0), 0);
+    out += `<div class="row"><span class="lbl">thread</span>${spark(ch.map((c) => c.first), { hi, color: '#8fb8e8',
+        t: (i) => 'erg #' + ch[i].erg + ' → card #' + ch[i].card + ': ' + fmtK(ch[i].first) + ' tok at call 1' + (ch[i].resumed ? ' ♨' : '') + (ch[i].usd != null ? ' · $' + ch[i].usd.toFixed(2) : '') })}` +
+      `<span>${ch.length} ergs up this chain · call-1 context ${fmtK(ch[0].first)} → ${fmtK(ch[ch.length - 1].first)} tok · Σ <b>$${usd.toFixed(2)}</b></span></div>`;
+  }
+  return out;
+}
+async function fillCosts(ids) {
+  for (const id of ids) {
+    const el = $('panel').querySelector(`.pcost[data-id="${id}"]`);
+    const c0 = CARDS.get(id);
+    if (!el || !c0 || c0.kind !== '{{AGENT_NAME}}') continue;    // only erg output cards carry costs
+    const c = COSTC.get(id);
+    if (c && c.data && el.dataset.ver !== String(c.at)) { el.innerHTML = costHtml(c.data); el.dataset.ver = String(c.at); }
+    const stale = !c || (c.live && Date.now() - c.at > 4500);
+    if (!stale || (c && c.pending)) continue;
+    const ent = { at: c ? c.at : 0, data: c ? c.data : null, live: false, pending: true };
+    COSTC.set(id, ent);
+    try {
+      const r = await fetch('/cost?k=' + K + '&id=' + id);
+      const d = await r.json();
+      if (!d.ok) throw new Error(d.error || 'cost fetch failed');
+      ent.data = d; ent.at = Date.now();
+      ent.live = d.ergs.some((e) => e.status === 'running') || (!d.ergs.length && c0.lock_erg != null);
+      const el2 = $('panel').querySelector(`.pcost[data-id="${id}"]`);
+      if (el2) { el2.innerHTML = costHtml(d); el2.dataset.ver = String(ent.at); }
+    } catch (e) { ent.at = Date.now(); ent.live = true; }   // retry on the next poll
+    ent.pending = false;
+  }
 }
 
 /* panel clicks are ordinary DOM clicks (no pointer capture out here) */
@@ -2386,7 +2562,28 @@ const TURK_BLOCK = TURK_MARK + ' (the operator\'s protocol, #3234) ━━\n' +
 /* ＋ inject dropdown (replaces the "save + 🎯 ask + ⚡ erg" button, #3234):
    choosing an entry appends its block once (marker-guarded) and resets the
    select; the operator then presses save + ⚡ erg. Several can be stacked. */
-const INJECTS = { ask: [ASK_MARK, ASK_BLOCK], turk: [TURK_MARK, TURK_BLOCK] };
+/* 🔎 AI review round (operator directive 2026-09-06, #3313): a blind fable + Sol review of
+   the PR the card chain points at — the operator's standing pre-review recipe
+   (in their knowledge base), one bg job, one wake. */
+const REVIEW_MARK = '━━ AI REVIEW ROUND';
+const REVIEW_BLOCK = REVIEW_MARK + ' (the operator\'s protocol, #3313) ━━\n' +
+  'Run ONE blind fable + Sol review round on the PR this card chain points at (your knowledge base\'s AI pre-review recipe; ' +
+  'reuse the latest work/<topic>/review-rN/launch.sh + prompt.txt as the template):\n' +
+  '• prep: fetch origin/<base> with the token header, merge-tree conflict check, scrub any token from the worktree remote, ' +
+  'clean tree at the exact PR head; pick fable\'s slot from web/limits.json\n' +
+  '• prompt: honor-system review-only header · PR description as filed (cut at the first "Review round"/"Round-N" heading) · ' +
+  'out-of-repo facts (producer payloads, deploy trigger, replica counts, sibling PRs) · how to run the suite/lint here · ' +
+  'the merge-day question · known owner decisions labelled as NOT blockers\n' +
+  '• run both bg-parallel in one job (run_in_background), put the node bin dir on PATH, fable retry on the other slot, ' +
+  'Sol retry on "at capacity"; the job writes fable-report.md / sol-report.md itself\n' +
+  '• on wake: one ANSWER card per robot (verdict · blockers · should-fix · nits · cost/duration) + a round summary card that names ' +
+  'the convergent finding, what to fold, and the next word (fold rN / mark ready / hold); update the PR\'s status card in place; ' +
+  'lessons → kb protocols.md same erg\n' +
+  '• review dir = work/<topic>/review-<pr>-rN/ (PR number in the name — sibling PRs in flight share nothing); ' +
+  'launch.sh refuses to start if $D/t0 exists\n' +
+  '• fold ONLY convergent, safe-direction one-liners in the same erg (say so, neutral commit, PATCH the PR body with a ' +
+  '"## Review round N" section); anything larger = the next word. On the wake, ALWAYS fold — never end with no response';
+const INJECTS = { ask: [ASK_MARK, ASK_BLOCK], turk: [TURK_MARK, TURK_BLOCK], review: [REVIEW_MARK, REVIEW_BLOCK] };
 $('ed-inject').onchange = () => {
   const sel = $('ed-inject'), inj = INJECTS[sel.value]; sel.value = '';
   if (!inj) return;

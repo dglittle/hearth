@@ -61,6 +61,10 @@ const alive = (pid) => { try { process.kill(pid, 0); return true; } catch (_) { 
 const db = new DatabaseSync(DB_PATH);
 db.exec('PRAGMA busy_timeout = 10000; PRAGMA foreign_keys = ON;');
 try { db.exec('ALTER TABLE ergs ADD COLUMN sid TEXT'); } catch (_) {}  // migration (warm-resume, card #756)
+// prompt-size columns on costs (operator directive 2026-09-06, #3440) — erg.js writes them; /cost reads them
+for (const col of ['sys_chars INTEGER', 'sys_parts TEXT', 'prompt_chars INTEGER', 'anc_chars INTEGER', 'ctx TEXT'])
+  try { db.exec('ALTER TABLE costs ADD COLUMN ' + col); } catch (_) {}
+const ctxm = require(path.join(HOME, 'tools', 'ctx.js'));
 // seen-set is server-side so gold ✦ new syncs across machines (card #971).
 // Row id=0 = "seeded" sentinel (card ids start at 1) — until a client seeds
 // (one-time migration from its localStorage set), clients keep local behavior.
@@ -798,6 +802,53 @@ function probeLimits(why) {
     });
 }
 
+// ---- per-card cost breakdown (operator directive 2026-09-06, #3440) ----
+// GET /cost?id=<card> → { ergs: [erg rows whose output card is <card>],
+//   chain: [one lite row per erg along the card's ANCESTRY, oldest first] }.
+// Erg row = costs row + prompt-size columns (+ ctx = context tokens per API
+// call, measured LIVE from the transcript while the erg still runs). The chain
+// answers "how expensive is this long thread": each ancestor erg's first-call
+// context = the prompt it was fired with.
+function ergRows(cardIds) {
+  if (!cardIds.length) return [];
+  const qs = cardIds.map(() => '?').join(',');
+  return db.prepare(
+    `SELECT e.id AS erg, e.info_card AS card, e.status, e.started_at, e.ended_at, e.sid,
+            co.wall_seconds, co.model, co.input_tokens, co.output_tokens, co.cache_read, co.cache_write, co.usd,
+            co.sys_chars, co.sys_parts, co.prompt_chars, co.anc_chars, co.ctx
+       FROM ergs e LEFT JOIN costs co ON co.erg_id = e.id
+      WHERE e.info_card IN (${qs}) ORDER BY e.id`).all(...cardIds).map((r) => {
+    const o = { ...r };
+    try { o.sys_parts = r.sys_parts ? JSON.parse(r.sys_parts) : null; } catch (_) { o.sys_parts = null; }
+    try { o.ctx = r.ctx ? JSON.parse(r.ctx) : null; } catch (_) { o.ctx = null; }
+    if (r.sid) try { o.resumed = !!db.prepare('SELECT 1 FROM ergs WHERE sid = ? AND id < ?').get(r.sid, r.erg); } catch (_) {}
+    if (r.status === 'running' && r.sid && !o.ctx) try {
+      const t = ctxm.ctxFromTranscript(path.join(TRANSCRIPTS, r.sid + '.jsonl'), r.started_at, null);
+      if (t && t.ctx.length) { o.ctx = t.ctx; o.live = true; }
+    } catch (_) {}
+    return o;
+  });
+}
+function cardCost(id) {
+  const ergs = ergRows([id]);
+  const seen = new Set([id]); let level = [id], depth = 0; const anc = [];
+  while (level.length && depth < 100) {
+    depth++;
+    const qs = level.map(() => '?').join(',');
+    const rows = db.prepare(
+      `SELECT DISTINCT c.id FROM links l JOIN cards c ON c.id = l.parent
+        WHERE l.child IN (${qs}) AND l.kind = 'child'`).all(...level);
+    const next = [];
+    for (const r of rows) if (!seen.has(r.id)) { seen.add(r.id); next.push(r.id); anc.push(r.id); }
+    level = next;
+  }
+  const lite = (r) => ({ erg: r.erg, card: r.card, usd: r.usd, first: r.ctx ? r.ctx[0] : null,
+    peak: r.ctx ? Math.max(...r.ctx) : null, calls: r.ctx ? r.ctx.length : null,
+    prompt: r.prompt_chars, resumed: r.resumed || false, status: r.status });
+  const chain = ergRows(anc).concat(ergs).map(lite).sort((a, b) => a.erg - b.erg);
+  return { ergs, chain };
+}
+
 // ------------------------------------------------------------------ http ---
 const handler = (req, res) => {
   const url = new URL(req.url, 'https://x');
@@ -870,6 +921,13 @@ const handler = (req, res) => {
     res.writeHead(200, { 'Content-Type': CT[name.split('.').pop().toLowerCase()] || 'application/octet-stream',
       'Cache-Control': 'private, max-age=31536000, immutable' });      // names are unique → cache forever
     return res.end(fs.readFileSync(p));
+  }
+
+  if (url.pathname === '/cost') {                  // panel-foot cost breakdown (#3440)
+    const id = parseInt(url.searchParams.get('id') || '', 10);
+    if (!id) return j(400, { ok: false, error: 'id?' });
+    try { return j(200, { ok: true, ...cardCost(id) }); }
+    catch (e) { return j(500, { ok: false, error: e.message }); }
   }
 
   if (url.pathname === '/hud') {                   // jet-HUD stream tails (#988)
