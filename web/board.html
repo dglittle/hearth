@@ -1496,6 +1496,7 @@ function mxSpawn(ntg) {
   else { x = -10; y = s - 2 * W - H; }
   return { x, y, vx: 0, vy: 0, g: (Math.random() * 62) | 0, age: 0, d0: 0, v: 1, pr: .5,
     ti, sd: Math.random() * 6.28,
+    ox: Math.random() - .5, oy: Math.random() - .5,          // v7 aim point (fraction of card w/h)
     spd: 140 + Math.random() * 110, sz: 9.5 + Math.random() * 4, tr: [] };
 }
 /* screen-space targets: one per running erg (clamped into view if offscreen).
@@ -1534,11 +1535,22 @@ const MXFX = [], MXFXFREE = [], MXFX_MAX = 96;
    MXGAIN = one dial for all of it (ring size/alpha, bloom, spark count/reach): 1 ≈ the
    original, .5 = default, 0 = flares only. Set localStorage.{{AGENT_NAME}}MxGain to taste. */
 const MXGAIN = Math.max(0, Math.min(1.5, parseFloat(localStorage.{{AGENT_NAME}}MxGain) || .5));
-/* v6 in-rect landing hazard (per second; see the landing block in mxLoop). Defaults: a glyph
-   crossing a 120-px card side at ~200 px/s pops ~90% of the time, peaking near the centre.
-   localStorage.{{AGENT_NAME}}MxLand = "edge,core" overrides (e.g. "0.4,4" = more pass-throughs). */
-const MXLAND = (localStorage.{{AGENT_NAME}}MxLand || '').split(',').map(parseFloat);
-const MXLAND_EDGE = MXLAND[0] >= 0 ? MXLAND[0] : 1, MXLAND_CORE = MXLAND[1] >= 0 ? MXLAND[1] : 4.5;
+/* v7 AIM POINTS (erg 1710, operator directive 2026-09-12 #4225/#4230 'letters hit the centre more than the sides'):
+   every glyph carries its own aim point, uniform over the inner 84% of the card, and lands
+   when it reaches it — plus a FLAT per-second pop-chance while inside the rect (early
+   impacts along the way). v6 aimed everything at the centre point (all paths = chords
+   through one point ⇒ 1/r density) and peaked the hazard there: sim (offline particle sim)
+   centre-ninth share 34% → 15%, cell-density CV 1.02 → 0.28. Higher λ = more early pops but
+   an entry-side bias creeps back (λ 2 ≈ v6's rate); 0 = pure aim-point landings (most even,
+   about half the impact rate). localStorage.{{AGENT_NAME}}MxLand = one number.
+   v7.1 SLAM (erg 1712, operator directive 2026-09-12 #4233 'slam into their target rather than overshoot and come back
+   around'): inside MXHOME px of its aim point a glyph stops flocking/swaying, homes hard (steer
+   gain 10 instead of 2.4, speed ×1.3) and lands at the point or at closest approach — sim:
+   glyphs that left the rect and returned 4.2% → 0.0%, frames spent flying away from the aim
+   46% → 0%, CV .30 → .23, impact rate +10%. With that, the flat hazard is no longer needed to
+   keep the rate up → default 0 = every landing is a slam at its own point. */
+const MXLAND_FLAT = (() => { const v = parseFloat(localStorage.{{AGENT_NAME}}MxLand); return v >= 0 ? v : 0; })();
+const MXHOME = 100;                                          // px: terminal-homing radius
 let mxLandN = 0;
 function mxImpact(p, small) {
   ++mxLandN;
@@ -1593,20 +1605,22 @@ function mxLoop(ts) {
     const p = MXP[i];
     const t = tg[p.ti % tg.length];
     let dead = false;
-    const dx = t.x - p.x, dy = t.y - p.y, d = Math.hypot(dx, dy) || 1;
-    /* landing v6 (operator directive 2026-09-06 #3420 'land WITHIN the rectangle, not on its side'): the
-       old rule popped a glyph the instant it crossed the inner-84% line → every impact sat
-       on a ring just inside the edge and read as "hit the wall". Now a glyph INSIDE the card
-       rect pops by chance each frame — hazard λ = MXLAND_EDGE at the border rising to
-       MXLAND_EDGE+MXLAND_CORE on the centre lines — so impacts scatter through the interior,
-       densest at the heart; the ~10% that sail out the far side get steered back (velocity
-       relaxes toward the centre) and loop around for another pass. Edge hint → radius as before */
+    /* v7: steer at the glyph's OWN aim point inside the card (edge hints keep the clamped centre) */
+    const tx = t.edge ? t.x : t.x + p.ox * t.w * .84, ty = t.edge ? t.y : t.y + p.oy * t.h * .84;
+    const dx = tx - p.x, dy = ty - p.y, d = Math.hypot(dx, dy) || 1;
+    /* landing v6 (operator directive 2026-09-06 #3420 'land WITHIN the rectangle, not on its side') popped
+       a glyph INSIDE the rect by a hazard peaking on the centre lines — but with every glyph
+       aimed at the centre the impacts still piled up there (the operator #4225). v7: a glyph lands
+       when it reaches its aim point (uniform over the card ⇒ even coverage), or earlier by a
+       flat chance MXLAND_FLAT/s while inside the inner 92%. v7.1: it also lands the moment it
+       starts moving AWAY from its aim point (closest approach) — no fly-past, no loop-back.
+       Edge hint → radius as before */
     let landed = false;
     if (t.edge) landed = d < t.r * .55 + 10;
     else {
-      const ix = 1 - Math.abs(dx) / (t.w * .46), iy = 1 - Math.abs(dy) / (t.h * .46);
+      const ix = 1 - Math.abs(t.x - p.x) / (t.w * .46), iy = 1 - Math.abs(t.y - p.y) / (t.h * .46);
       if (ix > 0 && iy > 0)                                  // inside the card rect (inner 92%)
-        landed = Math.random() < 1 - Math.exp(-(MXLAND_EDGE + MXLAND_CORE * Math.min(ix, iy)) * dt);
+        landed = d < 8 || dx * p.vx + dy * p.vy <= 0 || (MXLAND_FLAT > 0 && Math.random() < 1 - Math.exp(-MXLAND_FLAT * dt));
     }
     if (landed || p.age > 16) { dead = true; if (landed) mxImpact(p, t.edge); }
     else {
@@ -1627,15 +1641,19 @@ function mxLoop(ts) {
           ax += q.vx; ay += q.vy; sx += ex; sy += ey; nn++;
         }
       }
-      if (nn) {
+      /* v7.1 terminal homing: inside MXHOME px of the aim point the flock/sway let go and the
+         glyph dives straight at it (gain 10, speed ×1.3) → it SLAMS in instead of drifting past */
+      const homing = d < MXHOME;
+      if (nn && !homing) {
         const al = Math.hypot(ax, ay) || 1;
         ux += .7 * ax / al + .5 * sx / nn / CS; uy += .7 * ay / al + .5 * sy / nn / CS;
         const ul = Math.hypot(ux, uy) || 1; ux /= ul; uy /= ul;
       }
       /* steer + a small perpendicular sway → living, braided streams */
-      const wob = Math.sin(p.age * 2.1 + p.sd) * .18;
-      const dvx = (ux - uy * wob) * p.spd, dvy = (uy + ux * wob) * p.spd;
-      const m = Math.min(1, dt * 2.4);
+      const wob = homing ? 0 : Math.sin(p.age * 2.1 + p.sd) * .18;
+      const sp = homing ? p.spd * 1.3 : p.spd;
+      const dvx = (ux - uy * wob) * sp, dvy = (uy + ux * wob) * sp;
+      const m = Math.min(1, dt * (homing ? 10 : 2.4));
       p.vx += (dvx - p.vx) * m; p.vy += (dvy - p.vy) * m;
     }
     if (dead) {
@@ -2576,6 +2594,8 @@ const REVIEW_BLOCK = REVIEW_MARK + ' (the operator\'s protocol, #3313) ━━\n'
   'the merge-day question · known owner decisions labelled as NOT blockers\n' +
   '• run both bg-parallel in one job (run_in_background), put the node bin dir on PATH, fable retry on the other slot, ' +
   'Sol retry on "at capacity"; the job writes fable-report.md / sol-report.md itself\n' +
+  '• cost line = API-EQUIVALENT for EVERY robot, Sol/codex/OpenAI included (never "$0 (sub)" alone): the launcher runs ' +
+  'tools/sol-cost.js <round-dir> after the Sol lane (codex session ledger → $5/$0.50/$30 per M); quote it as "$X API-equiv ($0 paid)"\n' +
   '• on wake: one ANSWER card per robot (verdict · blockers · should-fix · nits · cost/duration) + a round summary card that names ' +
   'the convergent finding, what to fold, and the next word (fold rN / mark ready / hold); update the PR\'s status card in place; ' +
   'lessons → kb protocols.md same erg\n' +
