@@ -286,6 +286,36 @@ function kbIndexSection() {
     lines.join('\n');
 }
 
+// ---- tips: a COMPACT index of the wider board (prompt diet, erg 1842) ----
+// Every erg is TARGETED: `--card` is required and the generic no-target mode
+// died with §5b (1 generic erg in 1843 — #25, never since). So this block is
+// ambient context, never the routing menu mind card #3 describes, yet the raw
+// `card tips` output was ~13.3k chars = 23% of the whole system prompt (mean
+// title 271 chars, and status-card titles keep growing). We print id · i/u ·
+// lock · the title clipped to TIP_TITLE_MAX, drop the near-universal
+// "[{{AGENT_NAME}}/draft]" tag, and fold other ergs' live "⚙ erg #N working on…"
+// placeholders into one count line. Everything clipped is one `card show <id>`
+// away — nothing is hidden, only deferred. Measured on a 44-tip board
+// (2026-09-13): 13,334 → 5,244 chars, −61% of the block, −14% of the prompt.
+const TIP_TITLE_MAX = 120;
+function tipsSection() {
+  let rows = null;
+  try { rows = JSON.parse(cardCli(['tips', '--json']).out); } catch (_) {}
+  if (!Array.isArray(rows)) return cardCli(['tips']).out || '(no tips)';   // fallback: the plain list
+  const lines = []; let inflight = 0;
+  for (const c of rows) {
+    const title = String(c.title || '');
+    if (/^⚙ erg #\d+\b/.test(title)) { inflight++; continue; }   // another erg's live placeholder card
+    const tag = (c.kind === '{{AGENT_NAME}}' && c.status === 'draft') ? '' : ' [' + c.kind + '/' + c.status + ']';
+    const iu = (c.importance || c.urgency) ? ' i' + (c.importance ?? '-') + '·u' + (c.urgency ?? '-') : '';
+    const lk = c.lock_erg ? ' 🔒erg:' + c.lock_erg : '';
+    const t = title.length > TIP_TITLE_MAX ? title.slice(0, TIP_TITLE_MAX - 1).trimEnd() + '…' : title;
+    lines.push('#' + c.id + tag + iu + lk + ' ' + t);
+  }
+  if (inflight) lines.push('(+' + inflight + ' in-flight ⚙ erg cards hidden)');
+  return lines.join('\n') || '(no tips)';
+}
+
 // ---- system prompt: mind cards + ready-tips index + harness facts ----
 function buildSystemPrompt() {
   const parts = [];
@@ -311,9 +341,9 @@ function buildSystemPrompt() {
       ' ' + m.title).join('\n') || '(no memories)'));
   const kb = kbIndexSection();
   if (kb) parts.push(kb);
-  const tips = cardCli(['tips']).out;
-  parts.push('━━━ tips — the wider board (context only; your work is your target cards) ━━━\n' +
-    (tips || '(no tips)'));
+  parts.push('━━━ tips — the wider board (context only; your work is your target cards; ' +
+    'titles are CLIPPED to ' + TIP_TITLE_MAX + ' chars — `card show <id>` for the whole thing) ━━━\n' +
+    tipsSection());
   parts.push('━━━ this erg — harness facts ━━━\n' +
     'You are erg:' + ERG + '. ERG_ID=' + ERG + ' is set in your environment, so the card CLI ' +
     'attributes your locks and creations automatically.\n' +
