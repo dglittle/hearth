@@ -8,6 +8,13 @@
 # your own: `cd vendor/claude-cli && npm i` then point here:
 #CLAUDE_BIN={{AGENT_DIR}}/vendor/claude-cli/node_modules/.bin/claude
 #
+# Where the OpenAI `codex` CLI lives — only needed if you pick a gpt-* model in
+# the board's ⚡ dropdown (tools/codex-run.js drives `codex exec` for those; it
+# authenticates the same way the CLI does, e.g. a ChatGPT subscription login).
+# CODEX_EFFORT = reasoning effort passed as model_reasoning_effort (default medium).
+#CODEX_BIN={{AGENT_DIR}}/vendor/codex/node_modules/.bin/codex
+#CODEX_EFFORT=medium
+#
 # File holding CLAUDE_CODE_OAUTH_TOKEN= (and optional CLAUDE_CODE_OAUTH_TOKEN_2=
 # fallback). If unset, the tokens are taken from the process environment.
 #OAUTH_ENV_FILE=/path/to/tokens.env

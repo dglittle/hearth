@@ -1,0 +1,11 @@
+{
+  "name": "codex-cli",
+  "version": "1.0.0",
+  "private": true,
+  "description": "pinned OpenAI codex CLI for gpt-* erg model picks (tools/codex-run.js)",
+  "type": "commonjs",
+  "license": "ISC",
+  "dependencies": {
+    "@openai/codex": "^0.153.4"
+  }
+}

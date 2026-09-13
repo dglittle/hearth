@@ -52,6 +52,11 @@ try {
 
 const CLAUDE = process.env.ERG_CLAUDE_BIN || CONF.CLAUDE_BIN || 'claude';
 const TEST_MODE = !!process.env.ERG_CLAUDE_BIN;   // stub binary → skip budget probes
+// OpenAI runner for gpt-* picks (Astra/Sol) — operator directive #4334, erg 1758: tools/codex-run.js drives
+// `codex exec` on the ChatGPT sub and returns the same res shape finalize() reads.
+const codexRun = require(path.join(HOME, 'tools', 'codex-run.js'));
+const CODEX = process.env.ERG_CODEX_BIN || CONF.CODEX_BIN || path.join(HOME, 'vendor', 'codex', 'node_modules', '.bin', 'codex');
+const isCodex = (m) => codexRun.isCodexModel(m);
 const MODEL = 'claude-fable-5-1';   // needs claude CLI ≥2.1.251 — older CLIs reject the model client-side with a 400 (vendor/claude-cli pins one; see host.conf.example)
 const FALLBACK_MODEL = 'claude-opus-5'; // when fable weekly budget is dry (the operator 2026-07-27)
 const TOOLS = 'Bash,BashOutput,KillShell,Read,Edit,Write,Glob,Grep,WebFetch,WebSearch,TodoWrite';
@@ -86,8 +91,9 @@ const fmtTok = (n) => n < 1000 ? String(n) : n < 1e6 ? (n / 1e3).toFixed(n < 1e4
 const nowIso = () => new Date().toISOString().replace(/\.\d+Z$/, 'Z');
 
 // ---- args: one or more --card N (parents; REQUIRED), rest = extra context ----
-const parents = []; const restArgs = [];
+const parents = []; const restArgs = []; let PICKED = '';   // --model X = board dropdown pick (operator directive 2026-09-13, #4326)
 for (let i = 2; i < process.argv.length; i++) {
+  if (process.argv[i] === '--model') { PICKED = String(process.argv[++i] || '').trim(); continue; }
   if (process.argv[i] === '--card') {
     const n = parseInt(process.argv[++i], 10);
     if (!Number.isInteger(n)) { console.error('erg.js: --card needs an integer'); process.exit(1); }
@@ -96,7 +102,7 @@ for (let i = 2; i < process.argv.length; i++) {
 }
 if (!parents.length) {
   console.error('erg.js: at least one --card N is required (generic ergs are gone — §5b).');
-  console.error('usage: node erg.js --card N [--card M ...] ["extra context"]');
+  console.error('usage: node erg.js --card N [--card M ...] [--model <model id>] ["extra context"]');
   process.exit(1);
 }
 const extra = restArgs.join(' ').trim();
@@ -376,17 +382,28 @@ const PROBE_SRC = "const https=require('https');" +
   "'anthropic-version':'2023-06-01','content-type':'application/json'," +
   "'content-length':Buffer.byteLength(body)},timeout:20000},r=>{r.resume();" +
   "r.on('end',()=>console.log(JSON.stringify({http:r.statusCode," +
-  "status:r.headers['anthropic-ratelimit-unified-status']||null})))});" +
+  "status:r.headers['anthropic-ratelimit-unified-status']||null," +
+  "claim:r.headers['anthropic-ratelimit-unified-representative-claim']||null})))});" +
   "q.on('error',e=>console.log(JSON.stringify({error:e.message})));" +
   "q.on('timeout',()=>{q.destroy();console.log(JSON.stringify({error:'timeout'}))});" +
   "q.end(body);";
-function modelAllowed(tok, model) {
+// why the last probe said no, keyed '<model>@tok<slot>' → the API's
+// representative-claim (which bucket is dry: five_hour | seven_day |
+// seven_day_overage_included...). Lets the log name the real reason instead of
+// assuming "fable budget dry" — a five_hour block dries EVERY model on that
+// token, while a seven_day_overage_included block is fable-specific and leaves
+// opus runnable (verified live 2026-09-12).
+const BLOCK_WHY = {};
+function modelAllowed(tok, model, slot) {
   if (TEST_MODE) return true;       // stub binary — nothing real is spent
   try {
     const pr = spawnSync(process.execPath, ['-e', PROBE_SRC, model],
       { env: { ...process.env, PROBE_TOK: tok }, encoding: 'utf8', timeout: 25000 });
     const o = JSON.parse((pr.stdout || '').trim());
-    if (o.http === 429 || o.status === 'rejected') return false;
+    if (o.http === 429 || o.status === 'rejected') {
+      BLOCK_WHY[model + '@tok' + slot] = o.claim || 'limit';
+      return false;
+    }
   } catch (_) {}
   return true;
 }
@@ -401,6 +418,7 @@ function modelAllowed(tok, model) {
 // sandbox retest). SIGKILL from outside remains the dirty path (reaper).
 let CHILD = null, STOPPED = false;
 let RESUMED = false, SYS_USED = '';   // warm-resume state for finalize (card #756)
+let USED_CODEX = false;               // this erg ran on the codex runner (archive + bookkeeping differ)
 let PROMPT_USED = '';                 // the fired user prompt (size bookkeeping, card #3440)
 function killChildTree(sig) {
   if (!CHILD) return;
@@ -488,9 +506,25 @@ function runClaude(args, env, promptText) {
   // (the fable weekly bucket can be dry while opus budget remains). Model is
   // deliberately NOT sticky; token slot is (tok-pref.json). A failed resume
   // attempt (any error, not just limits) falls through to a fresh session.
+  // Board ⚡ model pick (operator directive 2026-09-13, #4326): an explicit --model is STRICT —
+  // that model on every slot (resume attempts too; a model switch on resume
+  // cold-misses the cache, the operator's call), no fallback to another model. The
+  // default pick (= MODEL) leaves the plan exactly as before.
+  // A session can only be resumed by its own runner: a codex thread by codex, a claude
+  // session by claude — otherwise the erg starts fresh (the fresh prompt carries the chain).
   const PLAN = [];
-  if (resume) for (const s of SLOT_ORDER) PLAN.push({ slot: s, model: resume.model, resume: true });
-  for (const m of [MODEL, FALLBACK_MODEL]) for (const s of SLOT_ORDER) PLAN.push({ slot: s, model: m });
+  if (PICKED && isCodex(PICKED)) {
+    // OpenAI runner (operator directive #4334, erg 1758): one attempt via codex exec on the ChatGPT sub —
+    // no token slots, no budget probe; a usage-limit refusal simply fails the erg loudly.
+    if (resume && isCodex(resume.model)) PLAN.push({ slot: prefSlot, model: PICKED, resume: true, codex: true });
+    PLAN.push({ slot: prefSlot, model: PICKED, codex: true });
+  } else if (PICKED && PICKED !== MODEL) {
+    if (resume && !isCodex(resume.model)) for (const s of SLOT_ORDER) PLAN.push({ slot: s, model: PICKED, resume: true });
+    for (const s of SLOT_ORDER) PLAN.push({ slot: s, model: PICKED });
+  } else {
+    if (resume && !isCodex(resume.model)) for (const s of SLOT_ORDER) PLAN.push({ slot: s, model: resume.model, resume: true });
+    for (const m of [MODEL, FALLBACK_MODEL]) for (const s of SLOT_ORDER) PLAN.push({ slot: s, model: m });
+  }
   if (!PLAN.length) PLAN.push({ slot: 1, model: MODEL });   // no tokens configured — rely on ambient auth
 
   let r, res, ok = false, sid, t0 = Date.now(), tokSlot = 1, model = MODEL, ran = false;
@@ -499,19 +533,21 @@ function runClaude(args, env, promptText) {
     if (STOPPED) break;
     tokSlot = PLAN[attempt].slot; model = PLAN[attempt].model;
     const isResume = !!PLAN[attempt].resume;
-    if (TOKS[tokSlot - 1] && !modelAllowed(TOKS[tokSlot - 1], model)) {
+    const isCodexRun = !!PLAN[attempt].codex;
+    if (!isCodexRun && TOKS[tokSlot - 1] && !modelAllowed(TOKS[tokSlot - 1], model, tokSlot)) {
       skipped.push(model + '@tok' + tokSlot);
-      log('budget probe: ' + model + ' rejected on token ' + tokSlot + ' — skipping');
+      log('budget probe: ' + model + ' rejected on token ' + tokSlot +
+        ' (' + (BLOCK_WHY[model + '@tok' + tokSlot] || 'limit') + ') — skipping');
       continue;
     }
-    sid = isResume ? resume.sid : crypto.randomUUID();
+    sid = isResume ? resume.sid : (isCodexRun ? null : crypto.randomUUID());   // codex: thread id arrives in its first event
     const env = { ...baseEnv };
     if (TOKS[tokSlot - 1]) env.CLAUDE_CODE_OAUTH_TOKEN = TOKS[tokSlot - 1];
     if (BG_WAIT) env.ERG_BG = '1';           // arms tools/bg-hook.js (card #1608)
     // system prompt → file (argv-limit dodge, card #2090); resume reuses the
     // file persisted for its original session (findResume verified it reads).
     const sysFile = sysPath(sid);
-    if (!isResume) {
+    if (!isResume && !isCodexRun) {
       try { fs.mkdirSync(ERGS_DIR, { recursive: true }); fs.writeFileSync(sysFile, sysPrompt); }
       catch (e) { log('sys-prompt file write failed: ' + e.message); }
     }
@@ -530,13 +566,24 @@ function runClaude(args, env, promptText) {
     try { db.prepare('UPDATE ergs SET sid = ? WHERE id = ?').run(sid, ERG); } catch (_) {}
     RESUMED = isResume; SYS_USED = isResume ? resume.sys : sysPrompt;
     PROMPT_USED = isResume ? resumePrompt : prompt;
-    log('erg #' + ERG + ' begins ' + sid + (isResume ? ' [♨ RESUME]' : '') +
+    log('erg #' + ERG + ' begins ' + (sid || '(codex thread pending)') + (isResume ? ' [♨ RESUME]' : '') + (isCodexRun ? ' [codex runner]' : '') +
       ' [cards #' + parents.join(',#') + ' → out #' + outCard + ']' +
-      (model !== MODEL ? ' [' + model + (isResume ? ' — session model' : ' — fable budget dry') + ']' : '') +
-      (attempt ? ' (RETRY on token ' + tokSlot + ')'
+      (model !== MODEL ? ' [' + model + (PICKED === model ? ' — picked on the board' : isResume ? ' — session model'
+        : ' — ' + MODEL + ' blocked: ' + (BLOCK_WHY[MODEL + '@tok' + tokSlot] ||
+            Object.keys(BLOCK_WHY).filter((k) => k.startsWith(MODEL + '@')).map((k) => BLOCK_WHY[k]).join('/') ||
+            'budget dry')) + ']' : '') +
+      (isCodexRun ? '' : attempt ? ' (RETRY on token ' + tokSlot + ')'
                : (slotWhy ? ' [token ' + tokSlot + ', ' + slotWhy + ']' : '')) +
       (extra ? ' :: ' + extra.slice(0, 100).replace(/\n/g, ' ') : ''));
-    r = await runClaude(args, env, isResume ? resumePrompt : prompt);
+    if (isCodexRun) {
+      USED_CODEX = true;
+      r = await codexRun.run({ bin: CODEX, cwd: HOME, model, env,
+        effort: process.env.ERG_CODEX_EFFORT || CONF.CODEX_EFFORT || 'medium',
+        sysPrompt: isResume ? resume.sys : sysPrompt, prompt: isResume ? resumePrompt : prompt,
+        resumeSid: isResume ? resume.sid : null, timeoutMs: TIMEOUT_MS,
+        onChild: (ch) => { CHILD = ch; }, onDone: () => { CHILD = null; },
+        onThread: (tid) => { sid = tid; log('codex thread ' + tid); try { db.prepare('UPDATE ergs SET sid = ? WHERE id = ?').run(sid, ERG); } catch (_) {} } });
+    } else r = await runClaude(args, env, isResume ? resumePrompt : prompt);
     res = null; try { res = JSON.parse(r.stdout); } catch (_) {}
     ok = !!res && !res.is_error && r.status === 0;
     if (ok) break;
@@ -563,14 +610,14 @@ function runClaude(args, env, promptText) {
   // run_in_background contract, piece 2 (card #1608): claude exited cleanly
   // but detached bg jobs may still run — wait on their markers, then wake the
   // session. Fully try/caught: any failure falls through to normal finalize.
-  if (ok && BG_WAIT && ran && !STOPPED) {
+  if (ok && BG_WAIT && ran && !STOPPED && !USED_CODEX) {
     try { ({ r, res } = await bgWaitLoop(sid, model, tokSlot, r, res)); }
     catch (e) { log('bg-wait failed (ignored): ' + e.message); }
   }
 
   // sticky token memory
-  if (ok && tokSlot !== prefSlot) log('token memory: next ergs start on token ' + tokSlot);
-  if (ok) { try { fs.writeFileSync(PREF_FILE, JSON.stringify({ slot: tokSlot, at: new Date().toISOString() }) + '\n'); } catch (_) {} }
+  if (ok && !USED_CODEX && tokSlot !== prefSlot) log('token memory: next ergs start on token ' + tokSlot);
+  if (ok && !USED_CODEX) { try { fs.writeFileSync(PREF_FILE, JSON.stringify({ slot: tokSlot, at: new Date().toISOString() }) + '\n'); } catch (_) {} }
   await finalize(ok, res, r, t0, ran, sid, tokSlot, model);
   process.exitCode = ok ? 0 : 1;
 })();
@@ -734,13 +781,14 @@ async function finalize(ok, res, r, t0, ran, sid, tokSlot = 1, model = MODEL) {
     turns: (res && res.num_turns) != null ? res.num_turns : null,
     tok, ok, cards: parents, out: outCard,
     resumed: RESUMED || undefined,
-    tokSlot: tokSlot > 1 ? tokSlot : undefined,
+    tokSlot: (!USED_CODEX && tokSlot > 1) ? tokSlot : undefined,   // codex runs use no Anthropic slot
     model: model !== MODEL ? model : undefined,
     extra: extra.slice(0, 120) || undefined }) + '\n');
 
   // archive the erg: copy the full transcript into the ergs/ FOLDER
   if (ran && sid && sid !== 'no-session') try {
-    const tf = path.join(os.homedir(), '.claude', 'projects', HOME.replace(/[\/._]/g, '-'), sid + '.jsonl');
+    const tf = USED_CODEX ? (codexRun.sessionFile(sid) || '(codex rollout for ' + sid + ' not found)')
+      : path.join(os.homedir(), '.claude', 'projects', HOME.replace(/[\/._]/g, '-'), sid + '.jsonl');
     if (fs.existsSync(tf)) {
       fs.mkdirSync(ERGS_DIR, { recursive: true });
       const name = new Date(t0).toISOString().slice(0, 19).replace(/:/g, '-') + 'Z--' + sid + '.jsonl';
@@ -750,7 +798,7 @@ async function finalize(ok, res, r, t0, ran, sid, tokSlot = 1, model = MODEL) {
   } catch (e) { log('archive failed: ' + e.message); }
 
   log((ok ? 'erg #' + ERG + ' done ' : 'ERG #' + ERG + ' FAILED ') + (sid || '') +
-    (tokSlot > 1 ? ' [token ' + tokSlot + ']' : '') +
+    (!USED_CODEX && tokSlot > 1 ? ' [token ' + tokSlot + ']' : '') +
     (model !== MODEL ? ' [' + model + ']' : '') +
     ' — took ' + fmtDur(Date.now() - t0) +
     ', cost ' + (usd != null ? '$' + usd.toFixed(2) : '$?') +

@@ -39,6 +39,11 @@ if (process.env.CARDS_DB && !process.env.BOARD_TEST &&
 }
 const DB_PATH = process.env.CARDS_DB || path.join(HOME, 'db', 'cards.db');
 const ERG_JS = path.join(HOME, 'erg.js');
+// board ⚡ model pick (#4326): the allow-set for action:erg {model} — anything else is a 400.
+// Keep the ids in sync with the ERG_MODELS list in web/board.html (that one is only the menu).
+// gpt-* ids run on the codex runner (tools/codex-run.js, #4334) instead of the claude CLI.
+const ERG_MODELS = new Set(['claude-fable-5-1', 'claude-opus-5', 'claude-sonnet-5', 'claude-haiku-4-5-20251001',
+  'gpt-6-astra', 'gpt-5.6-sol']);
 const REPORTS = path.join(HOME, 'output', 'reports'); // legacy 🧾 html companions
 const IMGS = path.join(HOME, 'imgs');                 // pasted images (#1168): board POST /img → file; {{AGENT_NAME}} reads imgs/<name> from disk
 const KEY = fs.readFileSync(path.join(__dirname, 'key.txt'), 'utf8').trim();
@@ -452,6 +457,10 @@ const ACTIONS = {
   erg(p) {  // §5b: parent card(s) ALWAYS passed; dup-target refusal; no generic mode
     const ids = (p.card_ids || []).map((v) => intOrNull(v, 'card_id'));
     if (!ids.length) throw new Error('card_ids[] required (generic ergs are gone — §5b)');
+    // ⚡ model pick (operator directive 2026-09-13, #4326): board dropdown → erg.js --model. gpt-* ids run
+    // through tools/codex-run.js (codex exec on the ChatGPT sub; operator directive #4334).
+    const model = p.model ? String(p.model) : '';
+    if (model && !ERG_MODELS.has(model)) { const e = new Error('unknown model ' + model); e.code = 400; throw e; }
     reap(true);
     for (const id of ids) {
       const c = mustCard(id);
@@ -462,6 +471,7 @@ const ACTIONS = {
       // ('ready' flip retired 2026-07-28 — all ergs are explicit; ⚡ needs no status change)
       const args = [ERG_JS];
       for (const id of ids) args.push('--card', String(id));
+      if (p.model) args.push('--model', model);
       if (p.extra) args.push(String(p.extra));
       const child = spawn(process.execPath, args,
         { cwd: HOME, detached: true, stdio: 'ignore', env: process.env });
